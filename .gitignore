@@ -1,0 +1,14 @@
+# Secrets
+.env
+
+# Bot memory:runtime state, not source code
+# On Railway: need to mount a Volume at /app/data so the bot memory survives redeploys
+data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.python-version
+venv/
+.venv/
