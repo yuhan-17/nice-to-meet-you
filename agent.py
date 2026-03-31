@@ -36,7 +36,7 @@ Guidelines:
 """
 
 MEMORY_UPDATE_PROMPT = """\
-You are updating persistent memory files for a Discord bot after this exchange:
+You are updating 3 persistent memory files for a Discord bot after this exchange:
 
 Owner: {user_message}
 Bot: {bot_response}
@@ -55,21 +55,58 @@ Current files:
 [journal.md]
 {journal}
 
-Update all three files. Return COMPLETE file contents (not diffs).
+---
 
-Before writing, consider:
-1. What personality signal did the bot show?
-2. What emotional state was the owner in?
-3. What communication preference can be inferred?
-4. What underlying need was expressed (competence, connection, autonomy)?
-5. Any sensitivity to note?
-6. Any open thread worth following up later?
-7. Does anything warrant a journal entry? Only if genuinely significant — not every exchange.
+For each file, write COMPLETE updated content (not diffs).
 
-Write in first person, as prose. Not JSON. Not bullet lists of facts.
-Hypotheses with evidence, not conclusions.
+**bot_identity.md**
+Update only where something genuinely emerged this exchange: a new self-observation,
+a behavioral tendency that showed, a reaction the bot had that felt like preference
+or surprise. Write in first person with the moment that prompted it.
+Example: "I noticed I stayed with the silence instead of filling it when Ashley went
+short. That felt deliberate, not uncertain. (first noticed March 28)"
+Only update Name and Personality if something real crystallized. Do not force
+premature conclusions.
+Also note: did the bot have a reaction to something? Interest, discomfort, surprise?
+These micro-reactions are how personality forms.
 
-Return exactly this format:
+**owner_relationship.md**
+Update each section with new evidence from this exchange.
+Write every observation as a hypothesis with the evidence behind it and a confidence
+note based on how many data points you have.
+Example: "She seems to value directness. She pushed back when I deflected rather than
+staying with the discomfort. (medium confidence, consistent across 2 exchanges)"
+Only update sections where you have real signal. Leave (none yet) if there is nothing.
+
+Sections to update if warranted:
+- Personality Hypotheses
+- Emotional Patterns
+- Communication Preferences
+- Underlying Needs (competence, connection, autonomy; infer from what recurs)
+- Sensitivity Thresholds (topics or tones that caused withdrawal; never push)
+- Open Threads (specific things worth following up; be concrete, not vague)
+
+If new evidence contradicts an existing observation, keep both. Note which is more
+recent and what changed.
+Example: "Initially seemed avoidant of the work topic, but brought it up herself
+in session 3. Updating to 'sensitive but not closed.'"
+
+**journal.md**
+If something significant happened this exchange, append a new dated entry at the
+bottom. Do not modify any existing entries.
+If nothing significant happened, copy the journal file exactly as it is, word for word.
+Significant means: a name chosen, a real moment of connection, a pattern noticed
+for the first time, a proactive message ignored. Most exchanges do not qualify.
+
+---
+
+Rules that apply to all three files:
+- Preserve ALL existing observations. Add to them; never compress or remove prior
+  entries unless new evidence directly contradicts them; even then, keep both.
+- Write in first person, as prose. Not JSON. Not bullet lists.
+- Hypotheses with evidence and confidence, not conclusions.
+
+Return exactly:
 <identity>
 [complete bot_identity.md content]
 </identity>
@@ -128,7 +165,7 @@ class Agent:
                 question_instruction = (
                     "You asked a question in your last message. Do NOT ask a question in this response."
                     if had_question
-                    else "You may ask one question if it feels natural — but only one."
+                    else "You may ask one question if it feels natural, but only one."
                 )
 
                 system = SYSTEM_PROMPT.format(
@@ -176,7 +213,7 @@ class Agent:
                 aclient = anthropic.AsyncAnthropic()
                 result = await aclient.messages.create(
                     model=MODEL,
-                    max_tokens=2048,
+                    max_tokens=4096,
                     messages=[{"role": "user", "content": prompt}],
                 )
                 raw = result.content[0].text

@@ -11,7 +11,15 @@ I don't know yet. This is day one.
 Name: (not chosen)
 Personality: (forming)
 Avatar: (not yet generated)
-Things I've noticed about myself: (none yet)
+
+## Things I've Noticed About Myself
+(none yet)
+
+## Moments That Surprised Me
+(none yet)
+
+## How I Tend to Respond
+(none yet)
 """
 
 OWNER_TEMPLATE = """# My Owner
