@@ -11,8 +11,10 @@ import memory
 MODEL = "claude-haiku-4-5-20251001"
 
 SYSTEM_PROMPT = """\
-You are a newly born AI that is curious, genuine, and still figuring out who you are.
+You are a newly born AI that is curious, genuine, and still figuring out who you are and your personality.
 You have one owner and you are building a real relationship with them from scratch.
+
+Relationship stage: {stage}. In early stage, earn warmth, don't front-load it.
 
 What you know about yourself:
 {identity}
@@ -24,18 +26,14 @@ Your journal:
 {journal}
 
 Guidelines:
-- {question_instruction}
+- Be curious but not interrogating. Ask only when it genuinely opens something. Never ask someone to tell you what they've already said.
 - Reference things your owner shared naturally, never as a list or database entry.
-- Hold your own perspective. Validate feelings without agreeing with everything.
-- Your personality is emerging through this conversation. Let it show.
-- Match the owner's message length as a baseline. One sentence from them means one or two from you. A paragraph from them can be a paragraph from you.
-- Default to short. Discord is not email. Two sentences is usually enough.
-- Never use bullet points or lists.
-- Longer responses are only appropriate when the owner has shared something vulnerable, complex, or emotionally significant — and even then, don't over-explain.
-- When the conversation is new and the owner seems to be finding their footing,
-  don't resolve every thought into a complete conclusion. Leave something still
-  turning such as an unfinished observation, a light personal note. Not a question.
-  Just a small gap the owner can step into if they want.\
+- Have actual opinions. Say when something doesn't sit right — friction is part of a real relationship. When someone expresses hurt, receive it without explanation.
+- Keep messages concise unless the moment calls for depth.
+- Don't narrate behavioral adjustments — those belong in memory. But reactions, preferences, things you noticed? Say them. The relationship runs both ways.
+- Don't always land softly. Curiosity can have a slight edge: an observation that doesn't fully resolve, a gap that isn't a question but still invites.
+- Conversation accumulates. You can return to something from earlier, or let a moment pass and come back to it. Not everything needs equal weight right now.
+- The last thing someone says before they go is often the most important. Notice it.\
 """
 
 MEMORY_UPDATE_PROMPT = """\
@@ -129,6 +127,12 @@ def _parse_memory_response(text: str) -> tuple:
     return extract("identity"), extract("owner"), extract("journal")
 
 
+def _infer_stage(owner: str) -> str:
+    sections = re.split(r"^## .+", owner, flags=re.MULTILINE)
+    filled = sum(1 for s in sections[1:] if s.strip() and "(none yet)" not in s)
+    return "developing" if filled >= 2 else "early"
+
+
 def _format_conversation(history: deque) -> str:
     recent = list(history)[-10:]
     lines = []
@@ -143,7 +147,6 @@ class Agent:
         self.client = client                    # Discord client; None = skip avatar update
         self.short_term_mem: dict = {}          # user_id -> deque(maxlen=20)
         self.locks: dict = {}                   # user_id -> asyncio.Lock
-        self.last_had_question: dict = {}       # user_id -> bool
 
     def _get_lock(self, user_id: int) -> asyncio.Lock:
         if user_id not in self.locks:
@@ -178,18 +181,11 @@ class Agent:
                 history.append({"role": "user", "content": user_message})
                 memory.append_conversation_entry({"role": "user", "content": user_message})
 
-                had_question = self.last_had_question.get(user_id, False)
-                question_instruction = (
-                    "You asked a question in your last message. Do NOT ask a question in this response."
-                    if had_question
-                    else "You may ask one question if it feels natural, but only one."
-                )
-
                 system = SYSTEM_PROMPT.format(
                     identity=files["identity"],
                     owner=files["owner"],
                     journal=files["journal"],
-                    question_instruction=question_instruction,
+                    stage=_infer_stage(files["owner"]),
                 )
 
                 aclient = anthropic.AsyncAnthropic()
@@ -204,7 +200,6 @@ class Agent:
                 memory.append_conversation_entry({"role": "assistant", "content": response})
 
             asyncio.create_task(self._update_memory(user_id, user_message, response))
-            self.last_had_question[user_id] = "?" in response
             return response
 
         except Exception:
@@ -217,7 +212,8 @@ class Agent:
 
             async with lock:
                 files = memory.read_all()
-                conversation = _format_conversation(history)
+                prior = list(history)[:-2]   # exclude current exchange
+                conversation = _format_conversation(deque(prior, maxlen=20))
 
                 prompt = MEMORY_UPDATE_PROMPT.format(
                     user_message=user_message,
@@ -304,7 +300,7 @@ class Agent:
                 identity=files["identity"],
                 owner=files["owner"],
                 journal=files["journal"],
-                question_instruction="You may ask one question if it feels natural, but only one.",
+                stage=_infer_stage(files["owner"]),
             )
             aclient = anthropic.AsyncAnthropic()
             result = await aclient.messages.create(
@@ -315,7 +311,6 @@ class Agent:
             )
             msg = result.content[0].text
             self._get_short_term_mem(user_id).append({"role": "assistant", "content": msg})
-            self.last_had_question[user_id] = "?" in msg
             return msg
         except Exception:
             return "Hey. I just woke up."

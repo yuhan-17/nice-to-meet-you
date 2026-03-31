@@ -1,7 +1,8 @@
 import json
+import os
 from pathlib import Path
 
-DATA_DIR = Path("data")
+DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 IDENTITY_FILE = DATA_DIR / "bot_identity.md"
 OWNER_FILE = DATA_DIR / "owner_relationship.md"
 JOURNAL_FILE = DATA_DIR / "journal.md"
