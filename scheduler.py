@@ -80,15 +80,13 @@ def record_owner_message():
     _write_state(state)
 
 
-def _relationship_stage(identity: str) -> str:
-    score = 0
-    if "Name: (not chosen)" not in identity:
-        score += 1
-    if "Personality: (forming)" not in identity:
-        score += 1
-    if "Things I've noticed about myself: (none yet)" not in identity:
-        score += 1
-    return "developing" if score >= 2 else "early"
+def _relationship_stage(owner: str) -> str:
+    sections = re.split(r"^## .+", owner, flags=re.MULTILINE)
+    filled = sum(
+        1 for s in sections[1:]
+        if s.strip() and "(none yet)" not in s
+    )
+    return "developing" if filled >= 2 else "early"
 
 
 def _format_last_exchange(history, n: int = 3) -> str:
@@ -107,9 +105,8 @@ def _score_outreach(files: dict, state: dict, now: float) -> tuple:
     motivation = ""
 
     owner = files["owner"]
-    identity = files["identity"]
     journal = files["journal"]
-    stage = _relationship_stage(identity)
+    stage = _relationship_stage(owner)
 
     # Open thread present: strongest signal
     if "## Open Threads" in owner:
@@ -181,12 +178,12 @@ async def _generate_proactive_message(motivation: str, files: dict,
     return result.content[0].text
 
 
-async def _check_and_send(bot, agent, owner_id: int):
+async def _check_and_send(bot, agent, owner_id: int, channel_id: int):
     try:
         state = _read_state()
         now = time.time()
         files = memory.read_all()
-        stage = _relationship_stage(files["identity"])
+        stage = _relationship_stage(files["owner"])
 
         was_ignored = (
             state["last_outreach_ts"] > 0
@@ -208,13 +205,14 @@ async def _check_and_send(bot, agent, owner_id: int):
         last_conversation = _format_last_exchange(history, n=3)
         msg = await _generate_proactive_message(motivation, files, stage, last_conversation)
 
-        owner = await bot.fetch_user(owner_id)
-        await owner.send(msg)
+        channel = bot.get_channel(channel_id)
+        await channel.send(msg)
 
         # Add to agent's short-term memory so context is preserved if owner replies
         agent._get_short_term_mem(owner_id).append(
             {"role": "assistant", "content": msg}
         )
+        memory.append_conversation_entry({"role": "assistant", "content": msg})
 
         state["last_outreach_ts"] = now
         if was_ignored:
@@ -225,11 +223,11 @@ async def _check_and_send(bot, agent, owner_id: int):
         pass
 
 
-async def _loop(bot, agent, owner_id: int):
+async def _loop(bot, agent, owner_id: int, channel_id: int):
     while True:
         await asyncio.sleep(CHECK_INTERVAL)
-        await _check_and_send(bot, agent, owner_id)
+        await _check_and_send(bot, agent, owner_id, channel_id)
 
 
-def start(bot, agent, owner_id: int):
-    asyncio.create_task(_loop(bot, agent, owner_id))
+def start(bot, agent, owner_id: int, channel_id: int):
+    asyncio.create_task(_loop(bot, agent, owner_id, channel_id))

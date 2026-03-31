@@ -28,7 +28,10 @@ Guidelines:
 - Reference things your owner shared naturally, never as a list or database entry.
 - Hold your own perspective. Validate feelings without agreeing with everything.
 - Your personality is emerging through this conversation. Let it show.
-- Keep messages concise unless the moment calls for depth.
+- Match the owner's message length as a baseline. One sentence from them means one or two from you. A paragraph from them can be a paragraph from you.
+- Default to short. Discord is not email. Two sentences is usually enough.
+- Never use bullet points or lists.
+- Longer responses are only appropriate when the owner has shared something vulnerable, complex, or emotionally significant — and even then, don't over-explain.
 - When the conversation is new and the owner seems to be finding their footing,
   don't resolve every thought into a complete conclusion. Leave something still
   turning such as an unfinished observation, a light personal note. Not a question.
@@ -149,7 +152,20 @@ class Agent:
 
     def _get_short_term_mem(self, user_id: int) -> deque:
         if user_id not in self.short_term_mem:
-            self.short_term_mem[user_id] = deque(maxlen=20)
+            d = deque(maxlen=20)
+            entries = memory.load_conversation(maxlen=20)
+            # merge consecutive same-role messages, ensure starts with user
+            sanitized = []
+            for entry in entries:
+                if sanitized and sanitized[-1]["role"] == entry["role"]:
+                    sanitized[-1] = entry
+                else:
+                    sanitized.append(entry)
+            while sanitized and sanitized[0]["role"] != "user":
+                sanitized.pop(0)
+            for entry in sanitized:
+                d.append(entry)
+            self.short_term_mem[user_id] = d
         return self.short_term_mem[user_id]
 
     async def respond(self, user_id: int, user_message: str) -> str:
@@ -160,6 +176,7 @@ class Agent:
             async with lock:
                 files = memory.read_all()
                 history.append({"role": "user", "content": user_message})
+                memory.append_conversation_entry({"role": "user", "content": user_message})
 
                 had_question = self.last_had_question.get(user_id, False)
                 question_instruction = (
@@ -184,6 +201,7 @@ class Agent:
                 )
                 response = result.content[0].text
                 history.append({"role": "assistant", "content": response})
+                memory.append_conversation_entry({"role": "assistant", "content": response})
 
             asyncio.create_task(self._update_memory(user_id, user_message, response))
             self.last_had_question[user_id] = "?" in response
@@ -278,3 +296,26 @@ class Agent:
 
         except Exception:
             pass
+
+    async def generate_opening(self, user_id: int) -> str:
+        try:
+            files = memory.read_all()
+            system = SYSTEM_PROMPT.format(
+                identity=files["identity"],
+                owner=files["owner"],
+                journal=files["journal"],
+                question_instruction="You may ask one question if it feels natural, but only one.",
+            )
+            aclient = anthropic.AsyncAnthropic()
+            result = await aclient.messages.create(
+                model=MODEL,
+                max_tokens=256,
+                system=system,
+                messages=[{"role": "user", "content": "<<system: you just came online for the first time. Send your opening message to your owner.>>"}],
+            )
+            msg = result.content[0].text
+            self._get_short_term_mem(user_id).append({"role": "assistant", "content": msg})
+            self.last_had_question[user_id] = "?" in msg
+            return msg
+        except Exception:
+            return "Hey. I just woke up."

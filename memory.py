@@ -1,9 +1,11 @@
+import json
 from pathlib import Path
 
 DATA_DIR = Path("data")
 IDENTITY_FILE = DATA_DIR / "bot_identity.md"
 OWNER_FILE = DATA_DIR / "owner_relationship.md"
 JOURNAL_FILE = DATA_DIR / "journal.md"
+CONVERSATION_FILE = DATA_DIR / "conversation.jsonl"
 
 IDENTITY_TEMPLATE = """# Who I Am
 I don't know yet. This is day one.
@@ -55,6 +57,26 @@ def ensure_files_exist():
         OWNER_FILE.write_text(OWNER_TEMPLATE)
     if not JOURNAL_FILE.exists():
         JOURNAL_FILE.write_text(JOURNAL_TEMPLATE)
+    if not CONVERSATION_FILE.exists():
+        CONVERSATION_FILE.write_text("")
+
+
+def load_conversation(maxlen: int = 20) -> list:
+    if not CONVERSATION_FILE.exists():
+        return []
+    lines = [l for l in CONVERSATION_FILE.read_text().splitlines() if l.strip()]
+    entries = []
+    for line in lines:
+        try:
+            entries.append(json.loads(line))
+        except Exception:
+            pass
+    return entries[-maxlen:]
+
+
+def append_conversation_entry(entry: dict):
+    with CONVERSATION_FILE.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
 
 
 def read_all() -> dict:
