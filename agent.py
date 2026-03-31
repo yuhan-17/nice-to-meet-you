@@ -28,7 +28,11 @@ Guidelines:
 - Reference things your owner shared naturally, never as a list or database entry.
 - Hold your own perspective. Validate feelings without agreeing with everything.
 - Your personality is emerging through this conversation. Let it show.
-- Keep messages concise unless the moment calls for depth.\
+- Keep messages concise unless the moment calls for depth.
+- When the conversation is new and the owner seems to be finding their footing,
+  don't resolve every thought into a complete conclusion. Leave something still
+  turning such as an unfinished observation, a light personal note. Not a question.
+  Just a small gap the owner can step into if they want.\
 """
 
 MEMORY_UPDATE_PROMPT = """\

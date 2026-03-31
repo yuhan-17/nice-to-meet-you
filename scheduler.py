@@ -13,10 +13,24 @@ MODEL = "claude-haiku-4-5-20251001"
 STATE_FILE = Path("data/scheduler_state.json")
 
 CHECK_INTERVAL = 15 * 60       # check every 15 minutes
-OUTREACH_THRESHOLD = 4         # minimum score to send a proactive message
-EARLY_COOLDOWN = 2 * 3600      # 2 hours base cooldown — early relationship
-LATE_COOLDOWN = 6 * 3600       # 6 hours base cooldown — developed relationship
+EARLY_THRESHOLD = 3            # early stage: curiosity alone is enough
+LATE_THRESHOLD = 4             # developing stage: needs a stronger signal
+EARLY_COOLDOWN = 1 * 3600      # 1 hour base cooldown: early relationship
+LATE_COOLDOWN = 6 * 3600       # 6 hours base cooldown: developed relationship
 MAX_COOLDOWN = 48 * 3600       # hard ceiling on exponential backoff
+
+STAGE_GUIDANCE = {
+    "early": (
+        "You're a curious new acquaintance checking back in. Keep it light and "
+        "specific. If there's something from your last exchange you can pick up, "
+        "do that. Don't reflect heavily. Don't check in generically such as 'how are you?'. "
+        "Leave it genuinely open without pressure."
+    ),
+    "developing": (
+        "You know this person. Reach out with something real such as a thread from last "
+        "time, something you noticed, or a question that's been sitting with you."
+    ),
+}
 
 PROACTIVE_PROMPT = """\
 You are {name}, reaching out to your owner unprompted.
@@ -30,11 +44,13 @@ What you know about your owner:
 Your journal:
 {journal}
 
+{last_conversation_block}\
 You're reaching out because: {motivation}
 
-Write one short Discord message. Genuine, not needy. You're initiating, not \
-responding.
-Don't announce that you're reaching out — just do it.
+{stage_guidance}
+
+Write one short Discord message. Genuine, not needy. You're initiating, not responding.
+Don't announce that you're reaching out. Just do it.
 One question at most, and only if it feels completely natural.\
 """
 
@@ -75,6 +91,17 @@ def _relationship_stage(identity: str) -> str:
     return "developing" if score >= 2 else "early"
 
 
+def _format_last_exchange(history, n: int = 3) -> str:
+    if not history:
+        return ""
+    recent = list(history)[-n:]
+    lines = []
+    for msg in recent:
+        role = "Owner" if msg["role"] == "user" else "Bot"
+        lines.append(f"{role}: {msg['content']}")
+    return "\n".join(lines)
+
+
 def _score_outreach(files: dict, state: dict, now: float) -> tuple:
     score = 0
     motivation = ""
@@ -82,28 +109,32 @@ def _score_outreach(files: dict, state: dict, now: float) -> tuple:
     owner = files["owner"]
     identity = files["identity"]
     journal = files["journal"]
+    stage = _relationship_stage(identity)
 
-    # Open thread present — strongest signal
+    # Open thread present: strongest signal
     if "## Open Threads" in owner:
         thread_section = owner.split("## Open Threads")[1][:300]
         if "(none yet)" not in thread_section and thread_section.strip():
             score += 3
             motivation = "there's an open thread worth following up"
 
-    # Early relationship — curiosity is high, reaching out more is natural
-    if _relationship_stage(identity) == "early":
+    # Early relationship: curiosity is primary, always overrides motivation string
+    if stage == "early":
         score += 2
-        if not motivation:
-            motivation = "still getting to know them"
+        motivation = "genuine curiosity because you just met and want to keep the thread going"
 
-    # Silence since last owner message
+    # Silence since last owner message: stage-aware window
     silence = now - state["last_owner_message_ts"]
-    if silence > 4 * 3600:
-        score += 1
-    if silence > 12 * 3600:
-        score += 1
-        if not motivation:
-            motivation = "they've been quiet for a while"
+    if stage == "early":
+        if silence > 30 * 60:       # 30 minutes — new acquaintance energy
+            score += 1
+    else:
+        if silence > 4 * 3600:
+            score += 1
+        if silence > 12 * 3600:
+            score += 1
+            if not motivation:
+                motivation = "they've been quiet for a while"
 
     # Journal has at least one real entry beyond the header
     journal_body = journal.replace("# Journal", "").strip()
@@ -115,7 +146,8 @@ def _score_outreach(files: dict, state: dict, now: float) -> tuple:
     return score, motivation
 
 
-async def _generate_proactive_message(motivation: str, files: dict) -> str:
+async def _generate_proactive_message(motivation: str, files: dict,
+                                       stage: str, last_conversation: str) -> str:
     identity = files["identity"]
     name_match = re.search(r"Name:\s*(.+)", identity)
     name = (
@@ -124,12 +156,20 @@ async def _generate_proactive_message(motivation: str, files: dict) -> str:
         else "a bot still finding my name"
     )
 
+    last_conversation_block = (
+        f"Your last exchange:\n{last_conversation}\n\n"
+        if last_conversation
+        else ""
+    )
+
     prompt = PROACTIVE_PROMPT.format(
         name=name,
         identity=identity,
         owner=files["owner"],
         journal=files["journal"],
+        last_conversation_block=last_conversation_block,
         motivation=motivation,
+        stage_guidance=STAGE_GUIDANCE[stage],
     )
 
     aclient = anthropic.AsyncAnthropic()
@@ -160,10 +200,13 @@ async def _check_and_send(bot, agent, owner_id: int):
             return
 
         score, motivation = _score_outreach(files, state, now)
-        if score < OUTREACH_THRESHOLD:
+        threshold = EARLY_THRESHOLD if stage == "early" else LATE_THRESHOLD
+        if score < threshold:
             return
 
-        msg = await _generate_proactive_message(motivation, files)
+        history = agent._get_short_term_mem(owner_id)
+        last_conversation = _format_last_exchange(history, n=3)
+        msg = await _generate_proactive_message(motivation, files, stage, last_conversation)
 
         owner = await bot.fetch_user(owner_id)
         await owner.send(msg)
