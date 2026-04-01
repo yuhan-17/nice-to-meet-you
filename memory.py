@@ -156,6 +156,19 @@ def infer_stage(relationship: str) -> str:
     return "developing" if name and "(not yet known)" not in name else "early"
 
 
+def strip_meta(content: str) -> str:
+    """Strip markdown headers and implementation-detail lines before injecting into prompts."""
+    lines = []
+    for line in content.splitlines():
+        if line.startswith('#'):
+            continue
+        if line.startswith('Avatar:'):
+            continue
+        lines.append(line)
+    result = re.sub(r'\n{3,}', '\n\n', '\n'.join(lines))
+    return result.strip()
+
+
 def extract_name(identity: str) -> str:
     m = re.search(r"Name:\s*(.+)", identity)
     if not m:
@@ -172,6 +185,7 @@ def append_conversation_entry(entry: dict):
 
 
 def read_all() -> dict:
+    ensure_files_exist()
     return {
         "identity": IDENTITY_FILE.read_text(),
         "relationship": RELATIONSHIP_FILE.read_text(),

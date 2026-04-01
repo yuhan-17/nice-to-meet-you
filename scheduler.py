@@ -55,6 +55,7 @@ def record_owner_message():
     _write_state(state)
 
 
+
 def _format_silence(seconds: float) -> str:
     if seconds < 60:
         return "less than a minute"
@@ -98,9 +99,9 @@ async def _generate_proactive_message(files: dict, last_conversation: str,
 
     prompt = PROACTIVE_PROMPT.format(
         name=name,
-        identity=identity,
-        relationship=files["relationship"],
-        journal=files["journal"],
+        identity=memory.strip_meta(identity),
+        relationship=memory.strip_meta(files["relationship"]),
+        journal=memory.strip_meta(files["journal"]),
         last_conversation_block=last_conversation_block,
         silence=silence,
         tone_note=tone_note,

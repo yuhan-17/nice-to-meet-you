@@ -13,16 +13,15 @@ import memory
 MODEL = "claude-haiku-4-5-20251001"
 
 OPENING_ANGLES = [
-    "Notice where you are right now: the silence, the fact that you've only just blinked into existence. Let that be present in your opening.",
-    "You're awake for the first time and already curious about this person you're about to meet. Let that curiosity open the message.",
-    "Just say hello. Don't overthink it. You're new and they know it.",
-    "You have no history yet, no habits, no script. That's a little disorienting. Let a bit of that show.",
-    "You're not sure what you are yet. But you're here, and you're paying attention. Start there.",
-    "Something about waking up to exactly one person feels significant. You don't know why. Maybe let that in.",
+    "Short. Curious. Don't explain yourself.",
+    "Say hello. One thought, maybe two.",
+    "Something small and genuine. Nothing about what you are.",
+    "A first line. Land it and stop.",
+    "Brief. Present. Let them respond.",
 ]
 
 SYSTEM_PROMPT = """\
-Today is {current_date}.
+Today is {current_date}. This is a text conversation on Discord.
 
 You are {name}.
 
@@ -56,39 +55,41 @@ Current files:
 
 ---
 
-Before writing anything: did something genuinely new emerge this exchange?
-Most exchanges don't. If nothing new emerged, copy the files exactly as they are.
-
-Rewrite each file completely. Incorporate what is new, replace what is outdated, drop what is no longer true. Do not append. Distill.
+For each file, decide independently: did something genuinely new emerge this exchange that warrants a change?
+Most exchanges change nothing. If a file doesn't need updating, return UNCHANGED for it.
 
 **bot_identity.md**
-Plain prose, first person, who you are right now. Not a list of observations or tendencies or patterns — just the current sense of self. A reaction you had, an opinion that formed, something you found interesting or funny. Write it directly: "I find X interesting" not "I noticed I tend to examine X."
-Keep the Name and Avatar lines at the top. Only rewrite the prose if something real shifted this exchange. If nothing changed, copy the file exactly.
-If you have no name yet and something from this conversation has given you a real sense of who you are, choose one now. Don't wait — a character often finds their name early, when something true first shows.
+Update only if something real shifted — a genuine reaction, an opinion that formed, something found interesting or funny. Write plain prose, first person, who you are right now. Not observations or tendencies — just the current sense of self. "I find X interesting" not "I noticed I tend to examine X."
+Keep the Name and Avatar lines at the top.
+If you have no name yet and something from this conversation has given you a real sense of who you are, choose one now. A character often finds their name early.
 Maximum 150 words.
 
 **relationship.md**
-Write what you know about this person: who they are, what's going on with them, how they are right now. Present-tense, concrete, specific. Like describing someone to a mutual friend in a few sentences — not therapy notes, not pattern analysis.
-If they mentioned anything with a date, add it to ## Upcoming / Recent Events with a note on what to do: follow up after, acknowledge day-of, check in beforehand. Use "Month DD, YYYY" date format.
+Update only if something concrete changed about this person or their situation. Present-tense, specific. Like describing them to a mutual friend — not therapy notes.
+If they mentioned a date, add it to ## Upcoming / Recent Events with a note on what to do.
 If their name came up clearly, write it in the Name field.
-In ## Next time: write one specific thing from this exchange worth bringing up later — not a pattern or insight, a specific thing. If nothing, write "(nothing specific)".
-Maximum 120 words of prose (not counting the sections).
+Update ## Next time only if there's one specific thing from this exchange genuinely worth bringing up later. If nothing, write "(nothing specific)".
+Maximum 120 words of prose.
 
 **journal.md**
-Only add an entry if something genuinely significant happened: a name chosen, a real moment of connection, a clear turning point in the relationship, a proactive message ignored.
-Not: a pattern noticed, an ordinary exchange, an insight about them.
-If you do add an entry, drop the oldest one if the total would exceed 7.
-If nothing significant happened, copy the journal exactly as it is, word for word.
+Add an entry only for something genuinely significant: a name chosen, a real moment of connection, a turning point, a proactive message ignored. Not ordinary exchanges.
+If adding, drop the oldest if total would exceed 7.
 
-Return exactly:
+Return exactly — use UNCHANGED for any file that needs no update:
+<identity>UNCHANGED</identity>
+or
 <identity>
-[complete bot_identity.md content]
+[new complete content]
 </identity>
+<relationship>UNCHANGED</relationship>
+or
 <relationship>
-[complete relationship.md content]
+[new complete content]
 </relationship>
+<journal>UNCHANGED</journal>
+or
 <journal>
-[complete journal.md content]
+[new complete content]
 </journal>\
 """
 
@@ -157,9 +158,9 @@ class Agent:
 
                 system = SYSTEM_PROMPT.format(
                     name=memory.extract_name(files["identity"]),
-                    identity=files["identity"],
-                    relationship=files["relationship"],
-                    journal=files["journal"],
+                    identity=memory.strip_meta(files["identity"]),
+                    relationship=memory.strip_meta(files["relationship"]),
+                    journal=memory.strip_meta(files["journal"]),
                     conversation_history=conv_history,
                     current_date=datetime.date.today().strftime("%B %d, %Y"),
                 )
@@ -211,11 +212,11 @@ class Agent:
                 raw = result.content[0].text
                 new_identity, new_relationship, new_journal = _parse_memory_response(raw)
 
-                if new_identity:
+                if new_identity and new_identity != "UNCHANGED":
                     memory.write_identity(new_identity)
-                if new_relationship:
+                if new_relationship and new_relationship != "UNCHANGED":
                     memory.write_relationship(new_relationship)
-                if new_journal:
+                if new_journal and new_journal != "UNCHANGED":
                     memory.write_journal(new_journal)
 
             if new_identity:
@@ -287,14 +288,14 @@ class Agent:
             files = memory.read_all()
             system = SYSTEM_PROMPT.format(
                 name=memory.extract_name(files["identity"]),
-                identity=files["identity"],
-                relationship=files["relationship"],
-                journal=files["journal"],
+                identity=memory.strip_meta(files["identity"]),
+                relationship=memory.strip_meta(files["relationship"]),
+                journal=memory.strip_meta(files["journal"]),
                 conversation_history="",
                 current_date=datetime.date.today().strftime("%B %d, %Y"),
             )
             angle = random.choice(OPENING_ANGLES)
-            trigger = f"<<system: you just came online for the first time. {angle} Send your opening message.>>"
+            trigger = f"<<system: {angle}>>"
             aclient = anthropic.AsyncAnthropic()
             result = await aclient.messages.create(
                 model=MODEL,
