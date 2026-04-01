@@ -54,7 +54,7 @@ JOURNAL_TEMPLATE = "# Journal\n"
 
 
 def ensure_files_exist():
-    DATA_DIR.mkdir(exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not IDENTITY_FILE.exists():
         IDENTITY_FILE.write_text(IDENTITY_TEMPLATE)
     if not OWNER_FILE.exists():
