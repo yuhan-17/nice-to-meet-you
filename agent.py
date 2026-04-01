@@ -295,7 +295,7 @@ class Agent:
                 current_date=datetime.date.today().strftime("%B %d, %Y"),
             )
             angle = random.choice(OPENING_ANGLES)
-            trigger = f"<<system: You just came online. {angle} If you feel like reaching out first, write your opening message. If you'd rather wait for them to start, return exactly: PASS>>"
+            trigger = f"<<system: You just came online. {angle}>>"
             aclient = anthropic.AsyncAnthropic()
             result = await aclient.messages.create(
                 model=MODEL,
@@ -304,8 +304,6 @@ class Agent:
                 messages=[{"role": "user", "content": trigger}],
             )
             msg = result.content[0].text.strip()
-            if msg.upper().startswith("PASS"):
-                return None
             self._get_short_term_mem(user_id).append({"role": "assistant", "content": msg})
             return msg
         except Exception:
