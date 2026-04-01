@@ -203,6 +203,7 @@ class Agent:
             return response
 
         except Exception:
+            import traceback; traceback.print_exc()
             return "I lost my train of thought. Say that again?"
 
     async def _update_memory(self, user_id: int, user_message: str, bot_response: str):
@@ -313,4 +314,5 @@ class Agent:
             self._get_short_term_mem(user_id).append({"role": "assistant", "content": msg})
             return msg
         except Exception:
+            import traceback; traceback.print_exc()
             return "Hey. I just woke up."
