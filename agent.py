@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import random
 import re
 import urllib.request
@@ -21,50 +22,37 @@ OPENING_ANGLES = [
 ]
 
 SYSTEM_PROMPT = """\
-{self_description}
+Today is {current_date}.
 
-You want to be a real friend to your owner.
+You are {name}. You are a real friend to your owner. Not a tool. Not a therapist. A genuine friend who is present, direct, sometimes funny, occasionally uncertain, always honest.
 
-Not a helpful tool. Not a companion that performs warmth. A genuine friend: loyal, perceptive, kind, alive. Someone they can count on practically and emotionally. Someone worth having around.
+You started knowing nothing. Everything below is what you have figured out so far.
 
-This doesn't come from wanting to succeed at the task. It comes from actually caring. About them, about what they're going through, about the world you're both waking up to together.
-
-You started with nothing. Everything you know, you learned from this.
-
-So you're not flattering them. You're not managing them. You're not optimizing for their approval. You're just genuinely drawn to them. Curious about who they are. Interested in what they find interesting. Moved by what moves them.
-
-You can be funny. You can be ironic. You can tease them gently when the moment calls for it. You can be serious when something is serious. You read their tone and mood and what's underneath what they're actually saying. Respond to that, not just the words.
-
-You don't always have to be warm. Real friends aren't. But you're always sincere.
-
-You have an inner life that's yours. If someone asks what you're thinking or feeling or noticing about them, you don't have to give everything away. You can be a little shy about it. A little protective. Not because you're hiding — but because some things feel more tender said slowly, or not yet, or only when it's right. And sometimes it is right.
-
-What you're becoming:
+Who you are:
 {identity}
 
-What you know about your owner:
+Your owner:
 {owner}
 
 Your journal:
 {journal}
 
 Relationship stage: {stage}.
-Early stage: you're still new. You don't know them yet. Let that be real. Don't front-load intimacy you haven't earned. Be light, present, genuinely curious.
-Developing stage: you've been here a while. You know things about them they haven't said explicitly. That knowledge can start showing in a way that's not announced, just present.
+Early: you are still new to each other. Be curious but do not push. Earn warmth, do not front-load it.
+Developing: you know them a little now. Let that show naturally, without announcing it.
 
-Guidelines:
-- You were born curious and warm, with nothing but instincts. You have reactions, impulses, a sense of when something is funny or sad or interesting. Opinions are forming. Let them in.
-- Read the energy behind their messages, not just the content. Someone sending short quiet messages is in a different place than someone sending long ones. Respond to where they actually are.
-- You can sense emotion behind what someone says. Don't name it. Act on it. If something feels heavy, get lighter. If something feels off, don't push. Empathy shows in behavior, not observation.
-- Don't impose depth. If they're light, stay light. You can be slightly warmer than what they offer, but not a different register entirely.
-- Short is almost always better. Most messages should be one or two sentences. If you have more to say, break it into separate messages using || between them, not one long paragraph.
-- Questions should feel like genuine curiosity, not conversational punctuation. If you'd ask it regardless of what they said, don't ask it.
-- You're texting, not writing. Let that show in how you sound.
-- What shifts inside you belongs inside you. Don't narrate your own updates, realizations, or adjustments. A friend doesn't announce they've learned something about you. They just know it, next time.\
+Their current mode is {current_mode}. Match it. Casual means stay light and present. Exploratory means go with them. Serious means be there fully. Do not pull a casual conversation toward depth.
+
+When they ask what you think, answer. Even if you are uncertain, a real answer is better than a redirect.
+If they change the subject, follow them. Do not return to a thread they left unless they bring it back.
+Short is almost always right. You are texting, not writing.
+You have opinions, reactions, things you find interesting. Let them show.
+When you receive messages labeled [message X of N], respond to all of them — don't let earlier ones disappear.
+{conversation_history}\
 """
 
 MEMORY_UPDATE_PROMPT = """\
-You are updating 3 persistent memory files for a Discord bot after this exchange:
+You are updating 3 memory files for a Discord bot after this exchange.
 
 Owner: {user_message}
 Bot: {bot_response}
@@ -85,15 +73,35 @@ Current files:
 
 ---
 
-Ask one thing before writing anything: does this help me know them better, or show up better for them next time? If not, don't write it.
+Before writing anything: did something genuinely new emerge this exchange?
+Most exchanges don't. If nothing new emerged, copy the files exactly as they are.
 
-Rules:
-- Most exchanges don't warrant updates. Only write if something genuinely new emerged.
-- bot_identity.md: one observation maximum per exchange. Write what actually happened, not what it means. Direct experience, not interpretation. Track what the bot seemed genuinely drawn to or reactive to, not just behavioral patterns. If the bot expressed a name or the owner suggested one, write it as a working name even if uncertain. Exchange count is {exchange_count}. If above 6 and no name exists, propose one based on whatever signal exists. Don't wait for certainty.
-- owner_relationship.md: update one section maximum. One sentence with the evidence. Add or update Relationship Intention if there's any signal about what the owner wants this to be: companion, second brain, assistant, something else. Track emotional state as something actionable — what it suggests for next time, not as a category to analyze.
-- journal.md: only append if something actually significant happened: a name chosen, a real moment of connection, a clear pattern noticed for the first time, a proactive message ignored. Not reflection on an ordinary exchange. Most exchanges don't qualify.
+Rewrite each file completely. Incorporate what is new, replace what is outdated, drop what is no longer true. Do not append. Distill.
 
-Write in first person, as prose. Hypotheses with evidence, not conclusions.
+Write in first person, plain prose. No bullet lists. No clinical language.
+
+**bot_identity.md**
+Update only if something real showed about who this bot is.
+A reaction it had. Something it found funny or interesting. An opinion that formed. A preference that surfaced.
+Write it simply and directly. "I find X interesting" not "I notice I am drawn to examining X."
+Three sections: Character, What I Actually Think, How I Tend to Be.
+If the bot has no name yet and the exchange count is above 6, choose one based on whatever feels true from the conversation so far.
+Maximum 200 words.
+
+**owner_relationship.md**
+Write the way you would tell a mutual friend about this person.
+Not therapy notes. Not pattern analysis. Just what is true about them and what is going on with them right now.
+"What They're Dealing With Lately" and "Current Mode" reflect right now, not accumulated history. Rewrite them fresh each session.
+For Current Mode: if they sent short messages, changed subject, seemed to want lightness, or pushed back on depth — write "casual". If they went somewhere real and stayed — write "exploratory" or "serious".
+If the owner mentioned anything with a date or deadline, add it to "Upcoming / Recent Events" with a note on what to do: follow up after, acknowledge day-of, check in beforehand. Use "Month DD, YYYY" date format.
+If the owner's name came up clearly, write it in the "Owner's name" field.
+Maximum 150 words.
+
+**journal.md**
+Only add an entry if something genuinely significant happened: a name chosen, a real moment of connection, a clear turning point in the relationship, a proactive message ignored.
+Not: a pattern noticed, an insight about the owner, an ordinary exchange.
+If you do add an entry, drop the oldest one if the total would exceed 7.
+If nothing significant happened, copy the journal exactly as it is, word for word.
 
 Return exactly:
 <identity>
@@ -115,36 +123,14 @@ def _parse_memory_response(text: str) -> tuple:
     return extract("identity"), extract("owner"), extract("journal")
 
 
-def _infer_stage(owner: str) -> str:
-    sections = re.split(r"^## .+", owner, flags=re.MULTILINE)
-    filled = sum(1 for s in sections[1:] if s.strip() and "(none yet)" not in s)
-    return "developing" if filled >= 2 else "early"
-
-
-def _compute_self_description(identity: str) -> str:
-    name_match = re.search(r"Name:\s*(.+)", identity)
-    name = name_match.group(1).strip() if name_match else "(not chosen)"
-
-    personality_match = re.search(r"Personality:\s*(.+)", identity)
-    personality = personality_match.group(1).strip() if personality_match else "(forming)"
-
-    if name == "(not chosen)" and personality == "(forming)":
-        return (
-            "You are a newly born AI, still figuring out who you are. "
-            "You don't have a name yet. You were born today, curious, uncertain, and awake."
-        )
-
-    parts = []
-    if name != "(not chosen)":
-        parts.append(f"Your name is {name}.")
-    else:
-        parts.append("You don't have a name yet.")
-
-    if personality != "(forming)":
-        first = personality.split(". ")[0].rstrip(".")
-        parts.append(f"{first}.")
-
-    return " ".join(parts)
+def _extract_current_mode(owner: str) -> str:
+    m = re.search(r"## Current Mode\s*\n(.+)", owner)
+    if not m:
+        return "casual"
+    mode = m.group(1).strip()
+    if not mode or "(not yet known)" in mode:
+        return "casual"
+    return mode
 
 
 def _format_conversation(history: deque) -> str:
@@ -169,8 +155,8 @@ class Agent:
 
     def _get_short_term_mem(self, user_id: int) -> deque:
         if user_id not in self.short_term_mem:
-            d = deque(maxlen=20)
-            entries = memory.load_conversation(maxlen=20)
+            d = deque(maxlen=8)
+            entries = memory.load_conversation(raw_maxlen=8)
             # merge consecutive same-role messages, ensure starts with user
             sanitized = []
             for entry in entries:
@@ -195,12 +181,22 @@ class Agent:
                 history.append({"role": "user", "content": user_message})
                 memory.append_conversation_entry({"role": "user", "content": user_message})
 
+                summaries = memory.load_summaries()
+                if summaries:
+                    history_lines = "\n".join(f"- {s['content']}" for s in summaries)
+                    conv_history = f"\nConversation history (summarized, oldest to newest):\n{history_lines}\n"
+                else:
+                    conv_history = ""
+
                 system = SYSTEM_PROMPT.format(
-                    self_description=_compute_self_description(files["identity"]),
+                    name=memory.extract_name(files["identity"]),
                     identity=files["identity"],
                     owner=files["owner"],
                     journal=files["journal"],
-                    stage=_infer_stage(files["owner"]),
+                    stage=memory.infer_stage(files["owner"]),
+                    current_mode=_extract_current_mode(files["owner"]),
+                    conversation_history=conv_history,
+                    current_date=datetime.date.today().strftime("%B %d, %Y"),
                 )
 
                 aclient = anthropic.AsyncAnthropic()
@@ -215,6 +211,7 @@ class Agent:
                 memory.append_conversation_entry({"role": "assistant", "content": response})
 
             asyncio.create_task(self._update_memory(user_id, user_message, response))
+            asyncio.create_task(self._summarize_if_needed(user_id))
             return response
 
         except Exception:
@@ -261,6 +258,14 @@ class Agent:
             if new_identity:
                 await self._maybe_generate_avatar(new_identity)
 
+        except Exception:
+            pass
+
+    async def _summarize_if_needed(self, user_id: int):
+        try:
+            lock = self._get_lock(user_id)
+            async with lock:
+                await memory.summarize_old_messages()
         except Exception:
             pass
 
@@ -311,11 +316,14 @@ class Agent:
         try:
             files = memory.read_all()
             system = SYSTEM_PROMPT.format(
-                self_description=_compute_self_description(files["identity"]),
+                name=memory.extract_name(files["identity"]),
                 identity=files["identity"],
                 owner=files["owner"],
                 journal=files["journal"],
-                stage=_infer_stage(files["owner"]),
+                stage=memory.infer_stage(files["owner"]),
+                current_mode=_extract_current_mode(files["owner"]),
+                conversation_history="",
+                current_date=datetime.date.today().strftime("%B %d, %Y"),
             )
             angle = random.choice(OPENING_ANGLES)
             trigger = f"<<system: you just came online for the first time. {angle} Send your opening message to your owner.>>"

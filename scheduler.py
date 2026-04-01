@@ -2,15 +2,14 @@ import asyncio
 import json
 import re
 import time
-from pathlib import Path
-
+from datetime import datetime, timedelta
 import anthropic
 
 import memory
 
 MODEL = "claude-haiku-4-5-20251001"
 
-STATE_FILE = Path("data/scheduler_state.json")
+STATE_FILE = memory.DATA_DIR / "scheduler_state.json"
 
 CHECK_INTERVAL = 15 * 60       # check every 15 minutes
 EARLY_THRESHOLD = 3            # early stage: curiosity alone is enough
@@ -84,13 +83,34 @@ def record_owner_message():
     _write_state(state)
 
 
-def _relationship_stage(owner: str) -> str:
-    sections = re.split(r"^## .+", owner, flags=re.MULTILINE)
-    filled = sum(
-        1 for s in sections[1:]
-        if s.strip() and "(none yet)" not in s
+def _parse_events_section(owner: str) -> list:
+    """Returns list of (datetime, line) for parseable events in ## Upcoming / Recent Events."""
+    if "## Upcoming / Recent Events" not in owner:
+        return []
+    section = owner.split("## Upcoming / Recent Events")[1]
+    next_section = re.search(r"^##", section, re.MULTILINE)
+    if next_section:
+        section = section[:next_section.start()]
+    events = []
+    date_re = re.compile(
+        r":\s*((?:January|February|March|April|May|June|July|August|September|October|November|December"
+        r"|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}|\d{4}-\d{2}-\d{2})"
     )
-    return "developing" if filled >= 2 else "early"
+    for line in section.splitlines():
+        line = line.strip()
+        if not line.startswith("-"):
+            continue
+        m = date_re.search(line)
+        if not m:
+            continue
+        date_str = m.group(1)
+        for fmt in ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d"):
+            try:
+                events.append((datetime.strptime(date_str, fmt), line))
+                break
+            except ValueError:
+                pass
+    return events
 
 
 def _format_last_exchange(history, n: int = 3) -> str:
@@ -110,7 +130,23 @@ def _score_outreach(files: dict, state: dict, now: float) -> tuple:
 
     owner = files["owner"]
     journal = files["journal"]
-    stage = _relationship_stage(owner)
+    stage = memory.infer_stage(owner)
+
+    # Upcoming or recently passed events
+    now_dt = datetime.fromtimestamp(now)
+    last_msg_ts = state["last_owner_message_ts"]
+    last_msg_dt = datetime.fromtimestamp(last_msg_ts) if last_msg_ts else None
+    for event_dt, _ in _parse_events_section(owner):
+        delta = event_dt - now_dt
+        if timedelta(0) <= delta <= timedelta(hours=48):
+            score += 3
+            motivation = "there's something coming up for them soon"
+            break
+        if timedelta(hours=-48) <= delta < timedelta(0):
+            if last_msg_dt is None or last_msg_dt < event_dt:
+                score += 3
+                motivation = "something just happened for them worth asking about"
+                break
 
     # Open thread present: strongest signal
     if "## Open Threads" in owner:
@@ -151,12 +187,7 @@ async def _generate_proactive_message(motivation: str, files: dict,
                                        stage: str, last_conversation: str,
                                        friction: bool = False) -> str:
     identity = files["identity"]
-    name_match = re.search(r"Name:\s*(.+)", identity)
-    name = (
-        name_match.group(1).strip()
-        if name_match and name_match.group(1).strip() != "(not chosen)"
-        else "a bot still finding my name"
-    )
+    name = memory.extract_name(identity)
 
     last_conversation_block = (
         f"Your last exchange:\n{last_conversation}\n\n"
@@ -196,7 +227,7 @@ async def _check_and_send(bot, agent, owner_id: int, channel_id: int):
         state = _read_state()
         now = time.time()
         files = memory.read_all()
-        stage = _relationship_stage(files["owner"])
+        stage = memory.infer_stage(files["owner"])
 
         was_ignored = (
             state["last_outreach_ts"] > 0

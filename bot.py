@@ -24,6 +24,7 @@ agent = Agent(client=bot)
 _pending: dict = {}       # user_id -> list of (content, ref_content or None)
 _debounce_tasks: dict = {}
 _last_message: dict = {}  # user_id -> last Discord message object
+_last_had_ref: dict = {}  # user_id -> bool, whether the last message was an explicit reply
 
 
 @bot.event
@@ -31,8 +32,7 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
     scheduler.start(bot, agent, OWNER_ID, CHANNEL_ID)
 
-    files = memory.read_all()
-    if "## Personality Hypotheses\n(none yet)" in files["owner"]:
+    if not memory.load_conversation(raw_maxlen=1):
         opening = await agent.generate_opening(OWNER_ID)
         channel = bot.get_channel(CHANNEL_ID)
         await channel.send(opening)
@@ -62,6 +62,7 @@ async def on_message(message):
         _pending[uid] = []
     _pending[uid].append((message.content, ref_content))
     _last_message[uid] = message
+    _last_had_ref[uid] = bool(message.reference)
 
     if uid in _debounce_tasks and not _debounce_tasks[uid].done():
         _debounce_tasks[uid].cancel()
@@ -70,6 +71,7 @@ async def on_message(message):
         await asyncio.sleep(3.5)
         messages = _pending.pop(uid, [])
         reply_to = _last_message.pop(uid, None)
+        had_ref = _last_had_ref.pop(uid, False)
         if not messages:
             return
 
@@ -83,7 +85,8 @@ async def on_message(message):
                     parts.append(f"[replying to: {ref}]\n{content}")
                 else:
                     parts.append(content)
-            combined = "\n---\n".join(parts)
+            n = len(parts)
+            combined = "\n".join(f"[message {i+1} of {n}]: {p}" for i, p in enumerate(parts))
 
         async with channel.typing():
             response = await agent.respond(uid, combined)
@@ -92,9 +95,10 @@ async def on_message(message):
         for i, part in enumerate(response_parts):
             if i > 0:
                 await asyncio.sleep(1.5)
-                await channel.send(part)
-            else:
+            if had_ref and i == 0:
                 await reply_to.reply(part)
+            else:
+                await channel.send(part)
 
     _debounce_tasks[uid] = asyncio.create_task(flush())
 
