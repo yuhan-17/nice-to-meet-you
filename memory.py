@@ -1,6 +1,9 @@
 import json
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 IDENTITY_FILE = DATA_DIR / "bot_identity.md"
@@ -54,15 +57,25 @@ JOURNAL_TEMPLATE = "# Journal\n"
 
 
 def ensure_files_exist():
-    DATA_DIR.mkdir(exist_ok=True)
-    if not IDENTITY_FILE.exists():
-        IDENTITY_FILE.write_text(IDENTITY_TEMPLATE)
-    if not OWNER_FILE.exists():
-        OWNER_FILE.write_text(OWNER_TEMPLATE)
-    if not JOURNAL_FILE.exists():
-        JOURNAL_FILE.write_text(JOURNAL_TEMPLATE)
-    if not CONVERSATION_FILE.exists():
-        CONVERSATION_FILE.write_text("")
+    logger.info("ensure_files_exist: DATA_DIR=%s", DATA_DIR.resolve())
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        logger.info("ensure_files_exist: directory ready at %s", DATA_DIR.resolve())
+    except Exception:
+        logger.exception("ensure_files_exist: failed to create directory %s", DATA_DIR.resolve())
+        raise
+    for path, template in [
+        (IDENTITY_FILE, IDENTITY_TEMPLATE),
+        (OWNER_FILE, OWNER_TEMPLATE),
+        (JOURNAL_FILE, JOURNAL_TEMPLATE),
+        (CONVERSATION_FILE, ""),
+    ]:
+        if not path.exists():
+            try:
+                path.write_text(template)
+                logger.info("ensure_files_exist: created %s", path.resolve())
+            except Exception:
+                logger.exception("ensure_files_exist: failed to create %s", path.resolve())
 
 
 def load_conversation(maxlen: int = 20) -> list:
@@ -79,8 +92,13 @@ def load_conversation(maxlen: int = 20) -> list:
 
 
 def append_conversation_entry(entry: dict):
-    with CONVERSATION_FILE.open("a") as f:
-        f.write(json.dumps(entry) + "\n")
+    logger.debug("append_conversation_entry: writing to %s", CONVERSATION_FILE.resolve())
+    try:
+        with CONVERSATION_FILE.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        logger.exception("append_conversation_entry: failed to write to %s", CONVERSATION_FILE.resolve())
+        raise
 
 
 def read_all() -> dict:
@@ -92,15 +110,33 @@ def read_all() -> dict:
 
 
 def write_identity(content: str):
-    IDENTITY_FILE.write_text(content)
+    logger.info("write_identity: writing to %s", IDENTITY_FILE.resolve())
+    try:
+        IDENTITY_FILE.write_text(content)
+        logger.info("write_identity: success")
+    except Exception:
+        logger.exception("write_identity: failed to write to %s", IDENTITY_FILE.resolve())
+        raise
 
 
 def write_owner(content: str):
-    OWNER_FILE.write_text(content)
+    logger.info("write_owner: writing to %s", OWNER_FILE.resolve())
+    try:
+        OWNER_FILE.write_text(content)
+        logger.info("write_owner: success")
+    except Exception:
+        logger.exception("write_owner: failed to write to %s", OWNER_FILE.resolve())
+        raise
 
 
 def write_journal(content: str):
-    JOURNAL_FILE.write_text(content)
+    logger.info("write_journal: writing to %s", JOURNAL_FILE.resolve())
+    try:
+        JOURNAL_FILE.write_text(content)
+        logger.info("write_journal: success")
+    except Exception:
+        logger.exception("write_journal: failed to write to %s", JOURNAL_FILE.resolve())
+        raise
 
 
 def count_messages() -> int:

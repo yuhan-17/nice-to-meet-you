@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 
 import discord
@@ -9,6 +10,12 @@ import scheduler
 from agent import Agent
 
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
 
 OWNER_ID = int(os.getenv("OWNER_ID"))
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))

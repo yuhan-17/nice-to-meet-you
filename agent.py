@@ -1,6 +1,8 @@
 import asyncio
+import logging
 import random
 import re
+import traceback
 import urllib.request
 from collections import deque
 
@@ -8,6 +10,8 @@ import anthropic
 import openai
 
 import memory
+
+logger = logging.getLogger(__name__)
 
 MODEL = "claude-haiku-4-5-20251001"
 
@@ -222,6 +226,8 @@ class Agent:
             return "I lost my train of thought. Say that again?"
 
     async def _update_memory(self, user_id: int, user_message: str, bot_response: str):
+        print(f"[_update_memory] called for user_id={user_id}", flush=True)
+        logger.info("_update_memory: starting for user_id=%s", user_id)
         try:
             lock = self._get_lock(user_id)
             history = self._get_short_term_mem(user_id)
@@ -252,17 +258,36 @@ class Agent:
                 new_identity, new_owner, new_journal = _parse_memory_response(raw)
 
                 if new_identity:
+                    logger.info("_update_memory: writing identity (len=%d)", len(new_identity))
                     memory.write_identity(new_identity)
+                else:
+                    logger.info("_update_memory: no identity update parsed from response")
                 if new_owner:
+                    logger.info("_update_memory: writing owner (len=%d)", len(new_owner))
                     memory.write_owner(new_owner)
+                else:
+                    logger.info("_update_memory: no owner update parsed from response")
                 if new_journal:
+                    logger.info("_update_memory: writing journal (len=%d)", len(new_journal))
                     memory.write_journal(new_journal)
+                else:
+                    logger.info("_update_memory: no journal update parsed from response")
 
             if new_identity:
                 await self._maybe_generate_avatar(new_identity)
 
+            logger.info("_update_memory: completed successfully for user_id=%s", user_id)
+
         except Exception:
-            pass
+            logger.error(
+                "_update_memory: failed for user_id=%s | user_message=%r | bot_response=%r",
+                user_id, user_message, bot_response,
+            )
+            logger.error("_update_memory: full traceback:\n%s", traceback.format_exc())
+            print(
+                f"[_update_memory] ERROR for user_id={user_id}:\n{traceback.format_exc()}",
+                flush=True,
+            )
 
     async def _maybe_generate_avatar(self, identity_content: str):
         try:
