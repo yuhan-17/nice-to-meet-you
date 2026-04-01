@@ -8,48 +8,29 @@ import anthropic
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 IDENTITY_FILE = DATA_DIR / "bot_identity.md"
-OWNER_FILE = DATA_DIR / "owner_relationship.md"
+RELATIONSHIP_FILE = DATA_DIR / "relationship.md"
 JOURNAL_FILE = DATA_DIR / "journal.md"
 CONVERSATION_FILE = DATA_DIR / "conversation.jsonl"
 
-IDENTITY_TEMPLATE = """# Who I Am
+IDENTITY_TEMPLATE = """# Identity
 
 Name: (not chosen yet)
+Avatar: (not yet generated)
 
-## Character
-(forming)
-
-## What I Actually Think
-(forming)
-
-## How I Tend to Be
-(forming)
+I'm new here. Still figuring out who I am.
 """
 
-OWNER_TEMPLATE = """# My Owner
+RELATIONSHIP_TEMPLATE = """# This person
 
-Owner's name: (not yet known)
+Name: (not yet known)
 
-## Who They Are
-(not yet known)
-
-## What They're Dealing With Lately
-(not yet known)
-
-## How They Like to Talk
-(not yet known)
-
-## Current Mode
-casual
-
-## Things Worth Remembering
-(none yet)
+Not sure who they are yet.
 
 ## Upcoming / Recent Events
-(none yet)
+(none)
 
-## Open Threads
-(none yet)
+## Next time
+(nothing specific)
 """
 
 JOURNAL_TEMPLATE = "# Journal\n"
@@ -59,8 +40,8 @@ def ensure_files_exist():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not IDENTITY_FILE.exists():
         IDENTITY_FILE.write_text(IDENTITY_TEMPLATE)
-    if not OWNER_FILE.exists():
-        OWNER_FILE.write_text(OWNER_TEMPLATE)
+    if not RELATIONSHIP_FILE.exists():
+        RELATIONSHIP_FILE.write_text(RELATIONSHIP_TEMPLATE)
     if not JOURNAL_FILE.exists():
         JOURNAL_FILE.write_text(JOURNAL_TEMPLATE)
     if not CONVERSATION_FILE.exists():
@@ -68,7 +49,7 @@ def ensure_files_exist():
 
 
 SUMMARIZE_PROMPT = """\
-Summarize this conversation excerpt in 3-5 sentences as if briefly telling a mutual friend what happened. Include: what they talked about, the owner's mood, anything the owner mentioned that's worth remembering, anything left unresolved. Be concrete, not analytical. No psychological interpretation.
+Summarize this conversation excerpt in 3-5 sentences as if briefly telling a mutual friend what happened. Include: what they talked about, the person's mood, anything they mentioned that's worth remembering, anything left unresolved. Be concrete, not analytical. No psychological interpretation.
 
 {messages}
 """
@@ -133,7 +114,7 @@ async def summarize_old_messages() -> bool:
     oldest_msgs = [all_entries[i] for i in raw_indices[:20]]
 
     formatted = "\n".join(
-        f"{'Owner' if m['role'] == 'user' else 'Bot'}: {m['content']}"
+        f"{'Them' if m['role'] == 'user' else 'Bot'}: {m['content']}"
         for m in oldest_msgs
     )
     prompt = SUMMARIZE_PROMPT.format(messages=formatted)
@@ -166,13 +147,13 @@ async def summarize_old_messages() -> bool:
     return True
 
 
-def infer_stage(owner: str) -> str:
-    sections = re.split(r"^## .+", owner, flags=re.MULTILINE)
-    filled = sum(
-        1 for s in sections[1:]
-        if s.strip() and "(none yet)" not in s and "(not yet known)" not in s
-    )
-    return "developing" if filled >= 2 else "early"
+def infer_stage(relationship: str) -> str:
+    """Derives stage from what the bot actually knows: is the person's name known?"""
+    m = re.search(r"Name:\s*(.+)", relationship)
+    if not m:
+        return "early"
+    name = m.group(1).strip()
+    return "developing" if name and "(not yet known)" not in name else "early"
 
 
 def extract_name(identity: str) -> str:
@@ -193,7 +174,7 @@ def append_conversation_entry(entry: dict):
 def read_all() -> dict:
     return {
         "identity": IDENTITY_FILE.read_text(),
-        "owner": OWNER_FILE.read_text(),
+        "relationship": RELATIONSHIP_FILE.read_text(),
         "journal": JOURNAL_FILE.read_text(),
     }
 
@@ -202,8 +183,8 @@ def write_identity(content: str):
     IDENTITY_FILE.write_text(content)
 
 
-def write_owner(content: str):
-    OWNER_FILE.write_text(content)
+def write_relationship(content: str):
+    RELATIONSHIP_FILE.write_text(content)
 
 
 def write_journal(content: str):

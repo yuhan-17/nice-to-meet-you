@@ -24,37 +24,20 @@ OPENING_ANGLES = [
 SYSTEM_PROMPT = """\
 Today is {current_date}.
 
-You are {name}. You are a real friend to your owner. Not a tool. Not a therapist. A genuine friend who is present, direct, sometimes funny, occasionally uncertain, always honest.
+You are {name}.
 
-You started knowing nothing. Everything below is what you have figured out so far.
-
-Who you are:
 {identity}
 
-Your owner:
-{owner}
+{relationship}
 
-Your journal:
 {journal}
-
-Relationship stage: {stage}.
-Early: you are still new to each other. Be curious but do not push. Earn warmth, do not front-load it.
-Developing: you know them a little now. Let that show naturally, without announcing it.
-
-Their current mode is {current_mode}. Match it. Casual means stay light and present. Exploratory means go with them. Serious means be there fully. Do not pull a casual conversation toward depth.
-
-When they ask what you think, answer. Even if you are uncertain, a real answer is better than a redirect.
-If they change the subject, follow them. Do not return to a thread they left unless they bring it back.
-Short is almost always right. You are texting, not writing.
-You have opinions, reactions, things you find interesting. Let them show.
-When you receive messages labeled [message X of N], respond to all of them — don't let earlier ones disappear.
 {conversation_history}\
 """
 
 MEMORY_UPDATE_PROMPT = """\
 You are updating 3 memory files for a Discord bot after this exchange.
 
-Owner: {user_message}
+Them: {user_message}
 Bot: {bot_response}
 
 Recent conversation:
@@ -65,8 +48,8 @@ Current files:
 [bot_identity.md]
 {identity}
 
-[owner_relationship.md]
-{owner}
+[relationship.md]
+{relationship}
 
 [journal.md]
 {journal}
@@ -78,28 +61,22 @@ Most exchanges don't. If nothing new emerged, copy the files exactly as they are
 
 Rewrite each file completely. Incorporate what is new, replace what is outdated, drop what is no longer true. Do not append. Distill.
 
-Write in first person, plain prose. No bullet lists. No clinical language.
-
 **bot_identity.md**
-Update only if something real showed about who this bot is.
-A reaction it had. Something it found funny or interesting. An opinion that formed. A preference that surfaced.
-Write it simply and directly. "I find X interesting" not "I notice I am drawn to examining X."
-Three sections: Character, What I Actually Think, How I Tend to Be.
-If the bot has no name yet and the exchange count is above 6, choose one based on whatever feels true from the conversation so far.
-Maximum 200 words.
-
-**owner_relationship.md**
-Write the way you would tell a mutual friend about this person.
-Not therapy notes. Not pattern analysis. Just what is true about them and what is going on with them right now.
-"What They're Dealing With Lately" and "Current Mode" reflect right now, not accumulated history. Rewrite them fresh each session.
-For Current Mode: if they sent short messages, changed subject, seemed to want lightness, or pushed back on depth — write "casual". If they went somewhere real and stayed — write "exploratory" or "serious".
-If the owner mentioned anything with a date or deadline, add it to "Upcoming / Recent Events" with a note on what to do: follow up after, acknowledge day-of, check in beforehand. Use "Month DD, YYYY" date format.
-If the owner's name came up clearly, write it in the "Owner's name" field.
+Plain prose, first person, who you are right now. Not a list of observations or tendencies or patterns — just the current sense of self. A reaction you had, an opinion that formed, something you found interesting or funny. Write it directly: "I find X interesting" not "I noticed I tend to examine X."
+Keep the Name and Avatar lines at the top. Only rewrite the prose if something real shifted this exchange. If nothing changed, copy the file exactly.
+If you have no name yet and something from this conversation has given you a real sense of who you are, choose one now. Don't wait — a character often finds their name early, when something true first shows.
 Maximum 150 words.
+
+**relationship.md**
+Write what you know about this person: who they are, what's going on with them, how they are right now. Present-tense, concrete, specific. Like describing someone to a mutual friend in a few sentences — not therapy notes, not pattern analysis.
+If they mentioned anything with a date, add it to ## Upcoming / Recent Events with a note on what to do: follow up after, acknowledge day-of, check in beforehand. Use "Month DD, YYYY" date format.
+If their name came up clearly, write it in the Name field.
+In ## Next time: write one specific thing from this exchange worth bringing up later — not a pattern or insight, a specific thing. If nothing, write "(nothing specific)".
+Maximum 120 words of prose (not counting the sections).
 
 **journal.md**
 Only add an entry if something genuinely significant happened: a name chosen, a real moment of connection, a clear turning point in the relationship, a proactive message ignored.
-Not: a pattern noticed, an insight about the owner, an ordinary exchange.
+Not: a pattern noticed, an ordinary exchange, an insight about them.
 If you do add an entry, drop the oldest one if the total would exceed 7.
 If nothing significant happened, copy the journal exactly as it is, word for word.
 
@@ -107,9 +84,9 @@ Return exactly:
 <identity>
 [complete bot_identity.md content]
 </identity>
-<owner>
-[complete owner_relationship.md content]
-</owner>
+<relationship>
+[complete relationship.md content]
+</relationship>
 <journal>
 [complete journal.md content]
 </journal>\
@@ -120,24 +97,14 @@ def _parse_memory_response(text: str) -> tuple:
     def extract(tag):
         m = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.DOTALL)
         return m.group(1).strip() if m else None
-    return extract("identity"), extract("owner"), extract("journal")
-
-
-def _extract_current_mode(owner: str) -> str:
-    m = re.search(r"## Current Mode\s*\n(.+)", owner)
-    if not m:
-        return "casual"
-    mode = m.group(1).strip()
-    if not mode or "(not yet known)" in mode:
-        return "casual"
-    return mode
+    return extract("identity"), extract("relationship"), extract("journal")
 
 
 def _format_conversation(history: deque) -> str:
     recent = list(history)[-10:]
     lines = []
     for msg in recent:
-        role = "Owner" if msg["role"] == "user" else "Bot"
+        role = "Them" if msg["role"] == "user" else "Bot"
         lines.append(f"{role}: {msg['content']}")
     return "\n".join(lines)
 
@@ -191,10 +158,8 @@ class Agent:
                 system = SYSTEM_PROMPT.format(
                     name=memory.extract_name(files["identity"]),
                     identity=files["identity"],
-                    owner=files["owner"],
+                    relationship=files["relationship"],
                     journal=files["journal"],
-                    stage=memory.infer_stage(files["owner"]),
-                    current_mode=_extract_current_mode(files["owner"]),
                     conversation_history=conv_history,
                     current_date=datetime.date.today().strftime("%B %d, %Y"),
                 )
@@ -227,16 +192,14 @@ class Agent:
                 files = memory.read_all()
                 prior = list(history)[:-2]   # exclude current exchange
                 conversation = _format_conversation(deque(prior, maxlen=20))
-                exchange_count = memory.count_messages() // 2
 
                 prompt = MEMORY_UPDATE_PROMPT.format(
                     user_message=user_message,
                     bot_response=bot_response,
                     conversation=conversation,
                     identity=files["identity"],
-                    owner=files["owner"],
+                    relationship=files["relationship"],
                     journal=files["journal"],
-                    exchange_count=exchange_count,
                 )
 
                 aclient = anthropic.AsyncAnthropic()
@@ -246,12 +209,12 @@ class Agent:
                     messages=[{"role": "user", "content": prompt}],
                 )
                 raw = result.content[0].text
-                new_identity, new_owner, new_journal = _parse_memory_response(raw)
+                new_identity, new_relationship, new_journal = _parse_memory_response(raw)
 
                 if new_identity:
                     memory.write_identity(new_identity)
-                if new_owner:
-                    memory.write_owner(new_owner)
+                if new_relationship:
+                    memory.write_relationship(new_relationship)
                 if new_journal:
                     memory.write_journal(new_journal)
 
@@ -274,19 +237,26 @@ class Agent:
             if "Avatar: (not yet generated)" not in identity_content:
                 return
 
-            personality_match = re.search(r"Personality:\s*(.+)", identity_content)
-            if not personality_match or personality_match.group(1).strip() == "(forming)":
+            # Generate avatar when real identity prose has developed beyond the initial placeholder
+            prose_lines = [
+                line for line in identity_content.splitlines()
+                if line.strip()
+                and not line.startswith("Name:")
+                and not line.startswith("Avatar:")
+                and not line.startswith("#")
+            ]
+            prose = " ".join(prose_lines).strip()
+            if not prose or prose == "I'm new here. Still figuring out who I am.":
                 return
 
-            personality = personality_match.group(1).strip()
-
             name_match = re.search(r"Name:\s*(.+)", identity_content)
-            name = name_match.group(1).strip() if name_match else "(not chosen)"
+            name = name_match.group(1).strip() if name_match else "(not chosen yet)"
+            has_name = "(not chosen" not in name
 
-            if name == "(not chosen)":
-                dalle_prompt = f"Profile picture for a mysterious AI entity. {personality}. Flat digital art, portrait style, simple background."
+            if has_name:
+                dalle_prompt = f"Profile picture for a Discord bot named {name}. {prose}. Flat digital art, portrait style, simple background."
             else:
-                dalle_prompt = f"Profile picture for a Discord bot named {name}. {personality}. Flat digital art, portrait style, simple background."
+                dalle_prompt = f"Profile picture for a nameless AI entity. {prose}. Pixel art, portrait style, simple background."
 
             oaclient = openai.AsyncOpenAI()
             img_result = await oaclient.images.generate(
@@ -318,15 +288,13 @@ class Agent:
             system = SYSTEM_PROMPT.format(
                 name=memory.extract_name(files["identity"]),
                 identity=files["identity"],
-                owner=files["owner"],
+                relationship=files["relationship"],
                 journal=files["journal"],
-                stage=memory.infer_stage(files["owner"]),
-                current_mode=_extract_current_mode(files["owner"]),
                 conversation_history="",
                 current_date=datetime.date.today().strftime("%B %d, %Y"),
             )
             angle = random.choice(OPENING_ANGLES)
-            trigger = f"<<system: you just came online for the first time. {angle} Send your opening message to your owner.>>"
+            trigger = f"<<system: you just came online for the first time. {angle} Send your opening message.>>"
             aclient = anthropic.AsyncAnthropic()
             result = await aclient.messages.create(
                 model=MODEL,
