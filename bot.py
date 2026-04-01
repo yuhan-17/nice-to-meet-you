@@ -34,8 +34,9 @@ async def on_ready():
 
     if not memory.load_conversation(raw_maxlen=1):
         opening = await agent.generate_opening(OWNER_ID)
-        channel = bot.get_channel(CHANNEL_ID)
-        await channel.send(opening)
+        if opening:
+            channel = bot.get_channel(CHANNEL_ID)
+            await channel.send(opening)
 
 
 @bot.event

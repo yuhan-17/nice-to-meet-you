@@ -21,7 +21,7 @@ OPENING_ANGLES = [
 ]
 
 SYSTEM_PROMPT = """\
-Today is {current_date}. This is a text conversation on Discord.
+Today is {current_date}. Discord DMs. Texting — short messages, back and forth.
 
 You are {name}.
 
@@ -283,7 +283,7 @@ class Agent:
         except Exception:
             pass
 
-    async def generate_opening(self, user_id: int) -> str:
+    async def generate_opening(self, user_id: int) -> str | None:
         try:
             files = memory.read_all()
             system = SYSTEM_PROMPT.format(
@@ -295,7 +295,7 @@ class Agent:
                 current_date=datetime.date.today().strftime("%B %d, %Y"),
             )
             angle = random.choice(OPENING_ANGLES)
-            trigger = f"<<system: {angle}>>"
+            trigger = f"<<system: You just came online. {angle} If you feel like reaching out first, write your opening message. If you'd rather wait for them to start, return exactly: PASS>>"
             aclient = anthropic.AsyncAnthropic()
             result = await aclient.messages.create(
                 model=MODEL,
@@ -303,9 +303,11 @@ class Agent:
                 system=system,
                 messages=[{"role": "user", "content": trigger}],
             )
-            msg = result.content[0].text
+            msg = result.content[0].text.strip()
+            if msg.upper().startswith("PASS"):
+                return None
             self._get_short_term_mem(user_id).append({"role": "assistant", "content": msg})
             return msg
         except Exception:
             import traceback; traceback.print_exc()
-            return "Hey. I just woke up."
+            return None
