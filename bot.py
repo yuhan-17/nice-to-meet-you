@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 import discord
@@ -19,6 +20,10 @@ bot = discord.Client(intents=intents)
 
 memory.ensure_files_exist()
 agent = Agent(client=bot)
+
+_pending: dict = {}       # user_id -> list of (content, ref_content or None)
+_debounce_tasks: dict = {}
+_last_message: dict = {}  # user_id -> last Discord message object
 
 
 @bot.event
@@ -42,10 +47,56 @@ async def on_message(message):
 
     scheduler.record_owner_message()
 
-    async with message.channel.typing():
-        response = await agent.respond(message.author.id, message.content)
+    ref_content = None
+    if message.reference:
+        try:
+            ref_msg = await message.channel.fetch_message(message.reference.message_id)
+            ref_content = ref_msg.content
+        except Exception:
+            pass
 
-    await message.channel.send(response)
+    uid = message.author.id
+    channel = message.channel
+
+    if uid not in _pending:
+        _pending[uid] = []
+    _pending[uid].append((message.content, ref_content))
+    _last_message[uid] = message
+
+    if uid in _debounce_tasks and not _debounce_tasks[uid].done():
+        _debounce_tasks[uid].cancel()
+
+    async def flush(uid=uid, channel=channel):
+        await asyncio.sleep(3.5)
+        messages = _pending.pop(uid, [])
+        reply_to = _last_message.pop(uid, None)
+        if not messages:
+            return
+
+        if len(messages) == 1:
+            content, ref = messages[0]
+            combined = f"[replying to: {ref}]\n{content}" if ref else content
+        else:
+            parts = []
+            for content, ref in messages:
+                if ref:
+                    parts.append(f"[replying to: {ref}]\n{content}")
+                else:
+                    parts.append(content)
+            combined = "\n---\n".join(parts)
+
+        async with channel.typing():
+            response = await agent.respond(uid, combined)
+
+        response_parts = [p.strip() for p in response.split("||") if p.strip()]
+        for i, part in enumerate(response_parts):
+            if i > 0:
+                await asyncio.sleep(1.5)
+                await channel.send(part)
+            else:
+                await reply_to.reply(part)
+
+    _debounce_tasks[uid] = asyncio.create_task(flush())
 
 
 bot.run(os.getenv("DISCORD_TOKEN"))

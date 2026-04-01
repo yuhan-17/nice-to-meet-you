@@ -21,14 +21,18 @@ MAX_COOLDOWN = 48 * 3600       # hard ceiling on exponential backoff
 
 STAGE_GUIDANCE = {
     "early": (
-        "You're a curious new acquaintance checking back in. Keep it light and "
-        "specific. If there's something from your last exchange you can pick up, "
-        "do that. Don't reflect heavily. Don't check in generically such as 'how are you?'. "
-        "Leave it genuinely open without pressure."
+        "You're new to this person and genuinely curious about them. "
+        "Keep it light and specific: a small observation, something you noticed, "
+        "something that occurred to you. Not a check-in. Not a question that needs answering. "
+        "Something that just says you're here, without asking anything of them. "
+        "If the last exchange had friction or ended quietly, don't continue from that same place. "
+        "Come in lighter — something small, low-stakes, without an agenda. Not a reset, just a different door."
     ),
     "developing": (
-        "You know this person. Reach out with something real such as a thread from last "
-        "time, something you noticed, or a question that's been sitting with you."
+        "You know this person a little. Reach out with something real: "
+        "a thread from last time, something you've been sitting with, "
+        "a moment of humor if it fits. "
+        "Read what the silence after your last exchange meant before deciding what to say."
     ),
 }
 
@@ -48,7 +52,7 @@ Your journal:
 You're reaching out because: {motivation}
 
 {stage_guidance}
-
+{tone_note}
 Write one short Discord message. Genuine, not needy. You're initiating, not responding.
 Don't announce that you're reaching out. Just do it.
 One question at most, and only if it feels completely natural.\
@@ -144,7 +148,8 @@ def _score_outreach(files: dict, state: dict, now: float) -> tuple:
 
 
 async def _generate_proactive_message(motivation: str, files: dict,
-                                       stage: str, last_conversation: str) -> str:
+                                       stage: str, last_conversation: str,
+                                       friction: bool = False) -> str:
     identity = files["identity"]
     name_match = re.search(r"Name:\s*(.+)", identity)
     name = (
@@ -159,6 +164,13 @@ async def _generate_proactive_message(motivation: str, files: dict,
         else ""
     )
 
+    tone_note = (
+        "The previous exchange ended with friction or was ignored. "
+        "Come in from a completely different angle, lighter, almost unrelated. "
+        "This is a reset, not a continuation."
+        if friction else ""
+    )
+
     prompt = PROACTIVE_PROMPT.format(
         name=name,
         identity=identity,
@@ -167,6 +179,7 @@ async def _generate_proactive_message(motivation: str, files: dict,
         last_conversation_block=last_conversation_block,
         motivation=motivation,
         stage_guidance=STAGE_GUIDANCE[stage],
+        tone_note=tone_note,
     )
 
     aclient = anthropic.AsyncAnthropic()
@@ -191,6 +204,22 @@ async def _check_and_send(bot, agent, owner_id: int, channel_id: int):
         )
         ignores = state["consecutive_ignores"]
         base = EARLY_COOLDOWN if stage == "early" else LATE_COOLDOWN
+
+        # Detect friction: short dismissive reply or outreach ignored
+        history = agent._get_short_term_mem(owner_id)
+        history_list = list(history)
+        friction = False
+        for i in range(len(history_list) - 1, -1, -1):
+            if history_list[i]["role"] == "assistant":
+                if i + 1 < len(history_list) and history_list[i + 1]["role"] == "user":
+                    if len(history_list[i + 1]["content"].split()) < 5:
+                        friction = True
+                break
+        if was_ignored:
+            friction = True
+        if friction:
+            base = min(base * 2, MAX_COOLDOWN)
+
         cooldown = min(base * (2 ** ignores), MAX_COOLDOWN)
 
         if now - state["last_outreach_ts"] < cooldown:
@@ -201,9 +230,8 @@ async def _check_and_send(bot, agent, owner_id: int, channel_id: int):
         if score < threshold:
             return
 
-        history = agent._get_short_term_mem(owner_id)
         last_conversation = _format_last_exchange(history, n=3)
-        msg = await _generate_proactive_message(motivation, files, stage, last_conversation)
+        msg = await _generate_proactive_message(motivation, files, stage, last_conversation, friction=friction)
 
         channel = bot.get_channel(channel_id)
         await channel.send(msg)

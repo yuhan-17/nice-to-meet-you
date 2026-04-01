@@ -43,6 +43,9 @@ I've just met them. Everything below is first impressions, not facts.
 ## Sensitivity Thresholds
 (none yet)
 
+## Relationship Intention
+(none yet)
+
 ## Open Threads
 (none yet)
 """
@@ -98,3 +101,10 @@ def write_owner(content: str):
 
 def write_journal(content: str):
     JOURNAL_FILE.write_text(content)
+
+
+def count_messages() -> int:
+    try:
+        return sum(1 for line in CONVERSATION_FILE.read_text().splitlines() if line.strip())
+    except FileNotFoundError:
+        return 0
