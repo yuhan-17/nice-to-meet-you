@@ -14,6 +14,8 @@ EARLY_COOLDOWN = 1 * 3600      # minimum gap between sent messages: early relati
 LATE_COOLDOWN = 6 * 3600       # minimum gap between sent messages: developed relationship
 MAX_COOLDOWN = 48 * 3600       # hard ceiling on exponential backoff
 
+ANCHOR_INJECTION_INTERVAL = 8  # re-inject persona anchor every N conversation turns
+
 def _build_proactive_prompt(files: dict, last_conversation: str, silence: str) -> str:
     return memory.load_prompt("proactive_outreach_prompt.md").format(
         name=memory.extract_name(files["identity"]),
@@ -31,10 +33,24 @@ def _read_state() -> dict:
             "last_owner_message_ts": 0,
             "last_outreach_ts": time.time(),  # grace period from first start
             "consecutive_ignores": 0,
+            "turns_since_anchor_injection": 0,
         }
         _write_state(state)
         return state
     return json.loads(STATE_FILE.read_text())
+
+
+def tick_anchor_counter() -> bool:
+    """Increment the per-turn counter. Returns True (and resets) when injection is due."""
+    state = _read_state()
+    count = state.get("turns_since_anchor_injection", 0) + 1
+    if count >= ANCHOR_INJECTION_INTERVAL:
+        state["turns_since_anchor_injection"] = 0
+        _write_state(state)
+        return True
+    state["turns_since_anchor_injection"] = count
+    _write_state(state)
+    return False
 
 
 def _write_state(state: dict):

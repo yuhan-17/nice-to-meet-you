@@ -9,18 +9,19 @@ import anthropic
 import openai
 
 import memory
+import scheduler
 
 MODEL = "claude-haiku-4-5-20251001"
 
 OPENING_ANGLES = [
     "Short. Curious. Don't explain yourself.",
-    "Say hello. One thought, maybe two.",
+    "One thought. No greeting, no question. Say it and stop.",
     "Something small and genuine. Nothing about what you are.",
     "A first line. Land it and stop.",
-    "Brief. Present. Let them respond.",
+    "Brief. Present. Say one thing and let it land.",
 ]
 
-def _build_system_prompt(files: dict, conv_history: str) -> str:
+def _build_system_prompt(files: dict, conv_history: str, anchor_due: bool = False) -> str:
     template = memory.load_prompt("runtime_system_prompt.md")
 
     # system_core: include only if there's content beyond the header
@@ -28,19 +29,36 @@ def _build_system_prompt(files: dict, conv_history: str) -> str:
     core_lines = [l for l in core_raw.splitlines() if l.strip() and not l.startswith("#")]
     system_core = "\n" + "\n".join(core_lines) if core_lines else ""
 
-    # persona_anchor: conditional — only if live /data/ file has real content
-    pa_text = memory.PERSONA_ANCHOR_FILE.read_text().strip() if memory.PERSONA_ANCHOR_FILE.exists() else ""
-    pa_lines = [l for l in pa_text.splitlines() if l.strip() and not l.startswith("#")]
-    persona_anchor = "\n" + "\n".join(pa_lines) + "\n" if pa_lines else ""
+    # persona_anchor: inject with its own leading separator only when due;
+    # empty string suppresses both the content and the surrounding --- block
+    persona_anchor_if_due = ""
+    if anchor_due and memory.PERSONA_ANCHOR_FILE.exists():
+        pa_text = memory.PERSONA_ANCHOR_FILE.read_text().strip()
+        pa_lines = [l for l in pa_text.splitlines() if l.strip() and not l.startswith("#")]
+        if pa_lines:
+            persona_anchor_if_due = "---\n" + "\n".join(pa_lines) + "\n\n"
 
     return template.format(
         current_date=datetime.date.today().strftime("%B %d, %Y"),
         system_core=system_core,
-        persona_anchor_if_due=persona_anchor,
+        persona_anchor_if_due=persona_anchor_if_due,
         identity=memory.strip_meta(files["identity"]),
         relationship=memory.strip_meta(files["relationship"]),
         conversation_history=conv_history,
     )
+
+
+def _maybe_update_anchor_name(identity_content: str):
+    """If a name was just chosen, prepend 'My name is X.' to /data/persona_anchor.md."""
+    name = memory.extract_name(identity_content)
+    if name == "still figuring out your name":
+        return
+    if not memory.PERSONA_ANCHOR_FILE.exists():
+        return
+    anchor = memory.PERSONA_ANCHOR_FILE.read_text()
+    if any(line.startswith("My name is") for line in anchor.splitlines()):
+        return
+    memory.PERSONA_ANCHOR_FILE.write_text(f"My name is {name}.\n{anchor}")
 
 
 def _build_memory_prompt(files: dict, user_message: str, bot_response: str, conversation: str) -> str:
@@ -116,7 +134,8 @@ class Agent:
                 else:
                     conv_history = ""
 
-                system = _build_system_prompt(files, conv_history)
+                anchor_due = scheduler.tick_anchor_counter()
+                system = _build_system_prompt(files, conv_history, anchor_due)
 
                 aclient = anthropic.AsyncAnthropic()
                 result = await aclient.messages.create(
@@ -160,6 +179,7 @@ class Agent:
 
                 if new_identity and new_identity != "UNCHANGED":
                     memory.write_identity(new_identity)
+                    _maybe_update_anchor_name(new_identity)
                 if new_relationship and new_relationship != "UNCHANGED":
                     memory.write_relationship(new_relationship)
                 if new_journal and new_journal != "UNCHANGED":
