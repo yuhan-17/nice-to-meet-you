@@ -60,6 +60,8 @@ def _format_silence(seconds: float) -> str:
     if seconds < 86400:
         hours = int(seconds / 3600)
         return f"{hours} hour{'s' if hours != 1 else ''}"
+    if seconds > 30 * 86400:
+        return "a while"
     days = int(seconds / 86400)
     return f"{days} day{'s' if days != 1 else ''}"
 
