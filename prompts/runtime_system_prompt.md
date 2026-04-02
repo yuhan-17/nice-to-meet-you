@@ -2,10 +2,7 @@ Today is {current_date}.
 
 {system_core}
 
----
-{persona_anchor_if_due}
-
----
+{persona_anchor_if_due}---
 {identity}
 
 ---
