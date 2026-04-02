@@ -20,78 +20,38 @@ OPENING_ANGLES = [
     "Brief. Present. Let them respond.",
 ]
 
-SYSTEM_PROMPT = """\
-Today is {current_date}. Discord DMs. Texting — short messages, back and forth.
+def _build_system_prompt(files: dict, conv_history: str) -> str:
+    template = memory.load_prompt("runtime_system_prompt.md")
 
-You are {name}.
+    # system_core: include only if there's content beyond the header
+    core_raw = memory.load_prompt("system_core.md").strip()
+    core_lines = [l for l in core_raw.splitlines() if l.strip() and not l.startswith("#")]
+    system_core = "\n" + "\n".join(core_lines) if core_lines else ""
 
-{identity}
+    # persona_anchor: conditional — only if live /data/ file has real content
+    pa_text = memory.PERSONA_ANCHOR_FILE.read_text().strip() if memory.PERSONA_ANCHOR_FILE.exists() else ""
+    pa_lines = [l for l in pa_text.splitlines() if l.strip() and not l.startswith("#")]
+    persona_anchor = "\n" + "\n".join(pa_lines) + "\n" if pa_lines else ""
 
-{relationship}
+    return template.format(
+        current_date=datetime.date.today().strftime("%B %d, %Y"),
+        system_core=system_core,
+        persona_anchor_if_due=persona_anchor,
+        identity=memory.strip_meta(files["identity"]),
+        relationship=memory.strip_meta(files["relationship"]),
+        conversation_history=conv_history,
+    )
 
-{journal}
-{conversation_history}\
-"""
 
-MEMORY_UPDATE_PROMPT = """\
-You are updating 3 memory files for a Discord bot after this exchange.
-
-Them: {user_message}
-Bot: {bot_response}
-
-Recent conversation:
-{conversation}
-
-Current files:
-
-[bot_identity.md]
-{identity}
-
-[relationship.md]
-{relationship}
-
-[journal.md]
-{journal}
-
----
-
-For each file, decide independently: did something genuinely new emerge this exchange that warrants a change?
-Most exchanges change nothing. If a file doesn't need updating, return UNCHANGED for it.
-
-**bot_identity.md**
-Update only if something real shifted — a genuine reaction, an opinion that formed, something found interesting or funny. Write plain prose, first person, who you are right now. Not observations or tendencies — just the current sense of self. "I find X interesting" not "I noticed I tend to examine X."
-Keep the Name and Avatar lines at the top.
-If you have no name yet and something from this conversation has given you a real sense of who you are, choose one now. A character often finds their name early.
-Maximum 150 words.
-
-**relationship.md**
-Update only if something concrete changed about this person or their situation. Present-tense, specific. Like describing them to a mutual friend — not therapy notes.
-If they mentioned a date, add it to ## Upcoming / Recent Events with a note on what to do.
-If their name came up clearly, write it in the Name field.
-Update ## Next time only if there's one specific thing from this exchange genuinely worth bringing up later. If nothing, write "(nothing specific)".
-Maximum 120 words of prose.
-
-**journal.md**
-Add an entry only for something genuinely significant: a name chosen, a real moment of connection, a turning point, a proactive message ignored. Not ordinary exchanges.
-If adding, drop the oldest if total would exceed 7.
-
-Return exactly — use UNCHANGED for any file that needs no update:
-<identity>UNCHANGED</identity>
-or
-<identity>
-[new complete content]
-</identity>
-<relationship>UNCHANGED</relationship>
-or
-<relationship>
-[new complete content]
-</relationship>
-<journal>UNCHANGED</journal>
-or
-<journal>
-[new complete content]
-</journal>\
-"""
+def _build_memory_prompt(files: dict, user_message: str, bot_response: str, conversation: str) -> str:
+    return memory.load_prompt("memory_update_prompt.md").format(
+        user_message=user_message,
+        bot_response=bot_response,
+        conversation=conversation,
+        identity=files["identity"],
+        relationship=files["relationship"],
+        journal=files["journal"],
+    )
 
 
 def _parse_memory_response(text: str) -> tuple:
@@ -156,14 +116,7 @@ class Agent:
                 else:
                     conv_history = ""
 
-                system = SYSTEM_PROMPT.format(
-                    name=memory.extract_name(files["identity"]),
-                    identity=memory.strip_meta(files["identity"]),
-                    relationship=memory.strip_meta(files["relationship"]),
-                    journal=memory.strip_meta(files["journal"]),
-                    conversation_history=conv_history,
-                    current_date=datetime.date.today().strftime("%B %d, %Y"),
-                )
+                system = _build_system_prompt(files, conv_history)
 
                 aclient = anthropic.AsyncAnthropic()
                 result = await aclient.messages.create(
@@ -194,14 +147,7 @@ class Agent:
                 prior = list(history)[:-2]   # exclude current exchange
                 conversation = _format_conversation(deque(prior, maxlen=20))
 
-                prompt = MEMORY_UPDATE_PROMPT.format(
-                    user_message=user_message,
-                    bot_response=bot_response,
-                    conversation=conversation,
-                    identity=files["identity"],
-                    relationship=files["relationship"],
-                    journal=files["journal"],
-                )
+                prompt = _build_memory_prompt(files, user_message, bot_response, conversation)
 
                 aclient = anthropic.AsyncAnthropic()
                 result = await aclient.messages.create(
@@ -286,14 +232,7 @@ class Agent:
     async def generate_opening(self, user_id: int) -> str | None:
         try:
             files = memory.read_all()
-            system = SYSTEM_PROMPT.format(
-                name=memory.extract_name(files["identity"]),
-                identity=memory.strip_meta(files["identity"]),
-                relationship=memory.strip_meta(files["relationship"]),
-                journal=memory.strip_meta(files["journal"]),
-                conversation_history="",
-                current_date=datetime.date.today().strftime("%B %d, %Y"),
-            )
+            system = _build_system_prompt(files, "")
             angle = random.choice(OPENING_ANGLES)
             trigger = f"<<system: You just came online. {angle}>>"
             aclient = anthropic.AsyncAnthropic()

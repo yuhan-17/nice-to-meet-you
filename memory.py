@@ -7,43 +7,41 @@ from pathlib import Path
 import anthropic
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
+PROMPTS_DIR = Path(os.getenv("PROMPTS_DIR", "prompts"))
+DOCS_DIR = Path(os.getenv("DOCS_DIR", "docs"))
+
 IDENTITY_FILE = DATA_DIR / "bot_identity.md"
-RELATIONSHIP_FILE = DATA_DIR / "relationship.md"
+RELATIONSHIP_FILE = DATA_DIR / "relationship_state.md"
 JOURNAL_FILE = DATA_DIR / "journal.md"
+PERSONA_ANCHOR_FILE = DATA_DIR / "persona_anchor.md"
 CONVERSATION_FILE = DATA_DIR / "conversation.jsonl"
 
-IDENTITY_TEMPLATE = """# Identity
 
-Name: (not chosen yet)
-Avatar: (not yet generated)
+def load_prompt(name: str) -> str:
+    """Read a prompt template from PROMPTS_DIR."""
+    return (PROMPTS_DIR / name).read_text()
 
-I'm new here. Still figuring out who I am.
-"""
 
-RELATIONSHIP_TEMPLATE = """# This person
-
-Name: (not yet known)
-
-Not sure who they are yet.
-
-## Upcoming / Recent Events
-(none)
-
-## Next time
-(nothing specific)
-"""
-
-JOURNAL_TEMPLATE = "# Journal\n"
+def _copy_template(src: Path, dest: Path):
+    """Copy src to dest if src exists, otherwise write empty string."""
+    dest.write_text(src.read_text() if src.exists() else "")
 
 
 def ensure_files_exist():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # Migrate old relationship.md → relationship_state.md
+    old_rel = DATA_DIR / "relationship.md"
+    if old_rel.exists() and not RELATIONSHIP_FILE.exists():
+        RELATIONSHIP_FILE.write_text(old_rel.read_text())
+    # Copy doc templates to /data/ on first boot
     if not IDENTITY_FILE.exists():
-        IDENTITY_FILE.write_text(IDENTITY_TEMPLATE)
+        _copy_template(DOCS_DIR / "bot_identity.md", IDENTITY_FILE)
     if not RELATIONSHIP_FILE.exists():
-        RELATIONSHIP_FILE.write_text(RELATIONSHIP_TEMPLATE)
+        _copy_template(DOCS_DIR / "relationship_state.md", RELATIONSHIP_FILE)
     if not JOURNAL_FILE.exists():
-        JOURNAL_FILE.write_text(JOURNAL_TEMPLATE)
+        _copy_template(DOCS_DIR / "journal.md", JOURNAL_FILE)
+    if not PERSONA_ANCHOR_FILE.exists():
+        _copy_template(PROMPTS_DIR / "persona_anchor.md", PERSONA_ANCHOR_FILE)
     if not CONVERSATION_FILE.exists():
         CONVERSATION_FILE.write_text("")
 

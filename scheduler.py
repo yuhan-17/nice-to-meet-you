@@ -14,20 +14,15 @@ EARLY_COOLDOWN = 1 * 3600      # minimum gap between sent messages: early relati
 LATE_COOLDOWN = 6 * 3600       # minimum gap between sent messages: developed relationship
 MAX_COOLDOWN = 48 * 3600       # hard ceiling on exponential backoff
 
-PROACTIVE_PROMPT = """\
-You are {name}.
-
-{identity}
-
-{relationship}
-
-{journal}
-
-{last_conversation_block}\
-It's been {silence} since they last said something.{tone_note}
-
-Do you feel like reaching out right now? If yes, write one short message — genuine, not needy. Don't announce you're reaching out. If the moment doesn't feel right, return exactly: PASS\
-"""
+def _build_proactive_prompt(files: dict, last_conversation: str, silence: str) -> str:
+    return memory.load_prompt("proactive_outreach_prompt.md").format(
+        name=memory.extract_name(files["identity"]),
+        identity=memory.strip_meta(files["identity"]),
+        relationship=memory.strip_meta(files["relationship"]),
+        journal=memory.strip_meta(files["journal"]),
+        last_conversation=last_conversation,
+        silence=silence,
+    )
 
 
 def _read_state() -> dict:
@@ -81,31 +76,8 @@ def _format_last_exchange(history, n: int = 3) -> str:
 
 
 async def _generate_proactive_message(files: dict, last_conversation: str,
-                                       silence: str, friction: bool = False) -> str | None:
-    identity = files["identity"]
-    name = memory.extract_name(identity)
-
-    last_conversation_block = (
-        f"Your last exchange:\n{last_conversation}\n\n"
-        if last_conversation
-        else ""
-    )
-
-    tone_note = (
-        "\nThe previous exchange ended with friction or was ignored. "
-        "If you do reach out, come from a different angle, lighter."
-        if friction else ""
-    )
-
-    prompt = PROACTIVE_PROMPT.format(
-        name=name,
-        identity=memory.strip_meta(identity),
-        relationship=memory.strip_meta(files["relationship"]),
-        journal=memory.strip_meta(files["journal"]),
-        last_conversation_block=last_conversation_block,
-        silence=silence,
-        tone_note=tone_note,
-    )
+                                       silence: str) -> str | None:
+    prompt = _build_proactive_prompt(files, last_conversation, silence)
 
     aclient = anthropic.AsyncAnthropic()
     result = await aclient.messages.create(
@@ -155,7 +127,7 @@ async def _check_and_send(bot, agent, owner_id: int, channel_id: int):
 
         silence = _format_silence(now - state["last_owner_message_ts"])
         last_conversation = _format_last_exchange(history, n=3)
-        msg = await _generate_proactive_message(files, last_conversation, silence, friction=friction)
+        msg = await _generate_proactive_message(files, last_conversation, silence)
 
         if msg is None:
             return
