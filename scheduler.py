@@ -88,7 +88,7 @@ async def _generate_proactive_message(files: dict, last_conversation: str,
         messages=[{"role": "user", "content": prompt}],
     )
     text = result.content[0].text.strip()
-    if text.upper().startswith("PASS"):
+    if not text or len(text.split()) < 5:
         return None
     return text
 
