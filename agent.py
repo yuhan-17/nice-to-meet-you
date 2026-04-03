@@ -21,7 +21,17 @@ OPENING_ANGLES = [
     "Brief. Present. Say one thing and let it land.",
 ]
 
-def _build_system_prompt(files: dict, conv_history: str, anchor_due: bool = False) -> str:
+def _read_persona_anchor_part_b() -> str:
+    """Read the Part B content from data/persona_anchor.md (between [PART_B] tags)."""
+    if not memory.PERSONA_ANCHOR_FILE.exists():
+        return "My place in this story is still forming."
+    text = memory.PERSONA_ANCHOR_FILE.read_text()
+    m = re.search(r"\[PART_B\](.*?)\[/PART_B\]", text, re.DOTALL)
+    return m.group(1).strip() if m else "My place in this story is still forming."
+
+
+
+def _build_system_prompt(files: dict, conv_history: str, anchor_due: bool = False, checker_signal: str = "") -> str:
     template = memory.load_prompt("runtime_system_prompt.md")
 
     # system_core: include only if there's content beyond the header
@@ -29,14 +39,20 @@ def _build_system_prompt(files: dict, conv_history: str, anchor_due: bool = Fals
     core_lines = [l for l in core_raw.splitlines() if l.strip() and not l.startswith("#")]
     system_core = "\n" + "\n".join(core_lines) if core_lines else ""
 
-    # persona_anchor: inject with its own leading separator only when due;
-    # empty string suppresses both the content and the surrounding --- block
+    # persona_anchor: inject Part A + Part B together when due
     persona_anchor_if_due = ""
     if anchor_due and memory.PERSONA_ANCHOR_FILE.exists():
-        pa_text = memory.PERSONA_ANCHOR_FILE.read_text().strip()
-        pa_lines = [l for l in pa_text.splitlines() if l.strip() and not l.startswith("#")]
-        if pa_lines:
-            persona_anchor_if_due = "---\n" + "\n".join(pa_lines) + "\n\n"
+        pa_text = memory.PERSONA_ANCHOR_FILE.read_text()
+        # Split on [PART_B] to isolate Part A
+        split = re.split(r"\[PART_B\]", pa_text)
+        part_a = split[0].strip() if split else ""
+        part_a_lines = [l for l in part_a.splitlines() if l.strip() and not l.startswith("#")]
+        part_b = _read_persona_anchor_part_b()
+        combined = "\n".join(part_a_lines)
+        if part_b:
+            combined = combined + "\n" + part_b
+        if combined.strip():
+            persona_anchor_if_due = "---\n" + combined.strip() + "\n\n"
 
     return template.format(
         current_date=datetime.date.today().strftime("%B %d, %Y"),
@@ -45,6 +61,7 @@ def _build_system_prompt(files: dict, conv_history: str, anchor_due: bool = Fals
         identity=memory.strip_meta(files["identity"]),
         relationship=memory.strip_meta(files["relationship"]),
         conversation_history=conv_history,
+        checker_signal=checker_signal,
     )
 
 
@@ -62,6 +79,9 @@ def _maybe_update_anchor_name(identity_content: str):
 
 
 def _build_memory_prompt(files: dict, user_message: str, bot_response: str, conversation: str) -> str:
+    anchor_text = files.get("persona_anchor", "")
+    m = re.search(r"\[PART_B\](.*?)\[/PART_B\]", anchor_text, re.DOTALL)
+    part_b = m.group(1).strip() if m else "My place in this story is still forming."
     return memory.load_prompt("memory_update_prompt.md").format(
         user_message=user_message,
         bot_response=bot_response,
@@ -69,6 +89,7 @@ def _build_memory_prompt(files: dict, user_message: str, bot_response: str, conv
         identity=files["identity"],
         relationship=files["relationship"],
         journal=files["journal"],
+        persona_anchor_part_b=part_b,
     )
 
 
@@ -76,7 +97,7 @@ def _parse_memory_response(text: str) -> tuple:
     def extract(tag):
         m = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.DOTALL)
         return m.group(1).strip() if m else None
-    return extract("identity"), extract("relationship"), extract("journal")
+    return extract("identity"), extract("relationship"), extract("journal"), extract("persona_anchor_part_b")
 
 
 def _format_conversation(history: deque) -> str:
@@ -93,6 +114,7 @@ class Agent:
         self.client = client                    # Discord client; None = skip avatar update
         self.short_term_mem: dict = {}          # user_id -> deque(maxlen=20)
         self.locks: dict = {}                   # user_id -> asyncio.Lock
+        self._checker_signal: str = ""          # cached silence signal, refreshed by _run_checker
 
     def _get_lock(self, user_id: int) -> asyncio.Lock:
         if user_id not in self.locks:
@@ -135,7 +157,17 @@ class Agent:
                     conv_history = ""
 
                 anchor_due = scheduler.tick_anchor_counter()
-                system = _build_system_prompt(files, conv_history, anchor_due)
+                checker_due = scheduler.tick_checker_counter(anchor_fired=anchor_due)
+                if checker_due:
+                    await self._run_checker()
+                else:
+                    self._checker_signal = ""
+                system = _build_system_prompt(files, conv_history, anchor_due, self._checker_signal)
+
+                # Name prompt injection — one turn only, cleared regardless of outcome
+                name_chosen = "(not yet chosen)" not in files["identity"]
+                if scheduler.should_prompt_name(memory.count_messages(), name_chosen):
+                    system = system + "\n\n" + memory.load_prompt("name_prompt_injection.md").strip()
 
                 aclient = anthropic.AsyncAnthropic()
                 result = await aclient.messages.create(
@@ -156,6 +188,13 @@ class Agent:
             import traceback; traceback.print_exc()
             return "I lost my train of thought. Say that again?"
 
+    async def _run_checker(self):
+        """Compute and cache the checker signal from current silence duration."""
+        try:
+            self._checker_signal = scheduler.get_checker_signal()
+        except Exception:
+            self._checker_signal = ""
+
     async def _update_memory(self, user_id: int, user_message: str, bot_response: str):
         try:
             lock = self._get_lock(user_id)
@@ -175,7 +214,7 @@ class Agent:
                     messages=[{"role": "user", "content": prompt}],
                 )
                 raw = result.content[0].text
-                new_identity, new_relationship, new_journal = _parse_memory_response(raw)
+                new_identity, new_relationship, new_journal, new_anchor_b = _parse_memory_response(raw)
 
                 if new_identity and new_identity != "UNCHANGED":
                     memory.write_identity(new_identity)
@@ -184,9 +223,17 @@ class Agent:
                     memory.write_relationship(new_relationship)
                 if new_journal and new_journal != "UNCHANGED":
                     memory.write_journal(new_journal)
+                if new_anchor_b and new_anchor_b != "UNCHANGED":
+                    memory.write_anchor_part_b(new_anchor_b)
 
-            if new_identity:
-                await self._maybe_generate_avatar(new_identity)
+                name_just_chosen = bool(
+                    new_identity and new_identity != "UNCHANGED"
+                    and memory.extract_name(new_identity) != "still figuring out your name"
+                )
+                current_identity = memory.IDENTITY_FILE.read_text()
+                avatar_generated = "Avatar: (not yet generated)" not in current_identity
+                if scheduler.should_generate_avatar(name_just_chosen, memory.count_messages(), avatar_generated):
+                    asyncio.create_task(self._maybe_generate_avatar())
 
         except Exception:
             pass
@@ -199,31 +246,36 @@ class Agent:
         except Exception:
             pass
 
-    async def _maybe_generate_avatar(self, identity_content: str):
+    async def _maybe_generate_avatar(self):
         try:
-            if "Avatar: (not yet generated)" not in identity_content:
-                return
+            identity_content = memory.IDENTITY_FILE.read_text()
+            journal_content = memory.JOURNAL_FILE.read_text()
+            relationship_content = memory.RELATIONSHIP_FILE.read_text()
 
-            # Generate avatar when real identity prose has developed beyond the initial placeholder
-            prose_lines = [
-                line for line in identity_content.splitlines()
-                if line.strip()
-                and not line.startswith("Name:")
-                and not line.startswith("Avatar:")
-                and not line.startswith("#")
+            name = memory.extract_name(identity_content)
+            has_name = name != "still figuring out your name"
+
+            # Prose from journal entries (split on ---), falling back to relationship content
+            journal_entries = [
+                e.strip() for e in re.split(r"---", journal_content)
+                if e.strip() and "don't have a name yet" not in e and "still forming" not in e
             ]
-            prose = " ".join(prose_lines).strip()
-            if not prose or prose == "I'm new here. Still figuring out who I am.":
-                return
+            if journal_entries:
+                prose = " ".join(journal_entries)
+            else:
+                rel_lines = [
+                    l for l in relationship_content.splitlines()
+                    if l.strip() and not l.startswith("#") and l.strip() != "Nothing established yet."
+                ]
+                prose = " ".join(rel_lines)
 
-            name_match = re.search(r"Name:\s*(.+)", identity_content)
-            name = name_match.group(1).strip() if name_match else "(not chosen yet)"
-            has_name = "(not chosen" not in name
+            if not prose:
+                prose = "a quiet, thoughtful presence in conversation"
 
             if has_name:
                 dalle_prompt = f"Profile picture for a Discord bot named {name}. {prose}. Flat digital art, portrait style, simple background."
             else:
-                dalle_prompt = f"Profile picture for a nameless AI entity. {prose}. Pixel art, portrait style, simple background."
+                dalle_prompt = f"Profile picture for a nameless AI presence. {prose}. Pixel art, portrait style, simple background."
 
             oaclient = openai.AsyncOpenAI()
             img_result = await oaclient.images.generate(

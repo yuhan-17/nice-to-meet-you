@@ -182,12 +182,27 @@ def append_conversation_entry(entry: dict):
         f.write(json.dumps(entry) + "\n")
 
 
+def write_anchor_part_b(new_b: str):
+    """Rewrite only the content between [PART_B] / [/PART_B] tags in data/persona_anchor.md."""
+    if not PERSONA_ANCHOR_FILE.exists():
+        return
+    text = PERSONA_ANCHOR_FILE.read_text()
+    updated = re.sub(
+        r"\[PART_B\].*?\[/PART_B\]",
+        f"[PART_B]\n{new_b}\n[/PART_B]",
+        text,
+        flags=re.DOTALL,
+    )
+    PERSONA_ANCHOR_FILE.write_text(updated)
+
+
 def read_all() -> dict:
     ensure_files_exist()
     return {
         "identity": IDENTITY_FILE.read_text(),
         "relationship": RELATIONSHIP_FILE.read_text(),
         "journal": JOURNAL_FILE.read_text(),
+        "persona_anchor": PERSONA_ANCHOR_FILE.read_text(),
     }
 
 

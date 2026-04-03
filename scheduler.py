@@ -14,7 +14,8 @@ EARLY_COOLDOWN = 1 * 3600      # minimum gap between sent messages: early relati
 LATE_COOLDOWN = 6 * 3600       # minimum gap between sent messages: developed relationship
 MAX_COOLDOWN = 48 * 3600       # hard ceiling on exponential backoff
 
-ANCHOR_INJECTION_INTERVAL = 8  # re-inject persona anchor every N conversation turns
+ANCHOR_INJECTION_INTERVAL = 8   # re-inject persona anchor every N conversation turns
+CHECKER_INJECTION_INTERVAL = 10  # inject checker signal every N conversation turns
 
 def _build_proactive_prompt(files: dict, last_conversation: str, silence: str) -> str:
     return memory.load_prompt("proactive_outreach_prompt.md").format(
@@ -34,10 +35,25 @@ def _read_state() -> dict:
             "last_outreach_ts": time.time(),  # grace period from first start
             "consecutive_ignores": 0,
             "turns_since_anchor_injection": 0,
+            "turns_since_checker_injection": 0,
+            "name_prompt_fired": False,
+            "avatar_prompt_fired": False,
         }
         _write_state(state)
         return state
     return json.loads(STATE_FILE.read_text())
+
+
+def get_checker_signal() -> str:
+    """Returns a silence note for the system prompt if the user has been quiet for a while."""
+    state = _read_state()
+    last_msg = state.get("last_owner_message_ts", 0)
+    if last_msg == 0:
+        return ""
+    silence = time.time() - last_msg
+    if silence < 1800:  # less than 30 minutes — not worth noting
+        return ""
+    return f"\n<<system: {_format_silence(silence)} since their last message>>"
 
 
 def tick_anchor_counter() -> bool:
@@ -50,6 +66,48 @@ def tick_anchor_counter() -> bool:
         return True
     state["turns_since_anchor_injection"] = count
     _write_state(state)
+    return False
+
+
+def tick_checker_counter(anchor_fired: bool = False) -> bool:
+    """Increment the checker counter. Returns True (and resets) when injection is due.
+    If anchor fired this same turn, suppresses checker and still resets the counter."""
+    state = _read_state()
+    count = state.get("turns_since_checker_injection", 0) + 1
+    if count >= CHECKER_INJECTION_INTERVAL:
+        state["turns_since_checker_injection"] = 0
+        _write_state(state)
+        return False if anchor_fired else True
+    state["turns_since_checker_injection"] = count
+    _write_state(state)
+    return False
+
+
+def should_prompt_name(exchange_count: int, name_chosen: bool) -> bool:
+    """Returns True once, at exchange 20, if name not yet chosen. Never fires again."""
+    if name_chosen:
+        return False
+    state = _read_state()
+    if state.get("name_prompt_fired", False):
+        return False
+    if exchange_count >= 20:
+        state["name_prompt_fired"] = True
+        _write_state(state)
+        return True
+    return False
+
+
+def should_generate_avatar(name_just_chosen: bool, exchange_count: int, avatar_generated: bool) -> bool:
+    """Returns True once when avatar generation should fire. Never fires again after that."""
+    if avatar_generated:
+        return False
+    state = _read_state()
+    if state.get("avatar_prompt_fired", False):
+        return False
+    if name_just_chosen or exchange_count >= 30:
+        state["avatar_prompt_fired"] = True
+        _write_state(state)
+        return True
     return False
 
 
