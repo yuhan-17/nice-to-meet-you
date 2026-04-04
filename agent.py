@@ -105,6 +105,7 @@ class Agent:
         self.short_term_mem: dict = {}          # user_id -> deque(maxlen=20)
         self.locks: dict = {}                   # user_id -> asyncio.Lock
         self._pending_name_proposal: bool = False  # set by _update_memory, consumed by respond()
+        self._avatar_generation_in_flight: bool = False  # prevents duplicate concurrent generations
 
     def _get_lock(self, user_id: int) -> asyncio.Lock:
         if user_id not in self.locks:
@@ -162,7 +163,7 @@ class Agent:
                         "call yourself", "what should i call you", "who are you",
                     ])
                     name_exchange = any(p in msg_lower for p in [
-                        "i'm ", "i am ", "my name is ", "call me ", "name's ",
+                        "my name is ", "call me ", "name's ",
                     ])
                     if direct_ask or name_exchange:
                         system = system + "\n\n" + memory.load_prompt("name_proposal_direct.md").strip()
@@ -174,18 +175,10 @@ class Agent:
                     self._pending_name_proposal = False
                     scheduler.consume_name_proposal_pending()
 
-                # Avatar direct-request path
+                # Avatar signal — inject instruction when not yet generated so LLM can self-trigger
                 avatar_generated = "Avatar: (not yet generated)" not in files["identity"]
                 if not avatar_generated:
-                    msg_lower_av = user_message.lower()
-                    avatar_request = any(p in msg_lower_av for p in [
-                        "get yourself an avatar", "get an avatar", "generate it",
-                        "generate an avatar", "pick an avatar", "make an avatar",
-                        "get a profile picture", "get a picture", "make a profile",
-                        "give yourself a picture",
-                    ])
-                    if avatar_request:
-                        asyncio.create_task(self._maybe_generate_avatar(user_id))
+                    system = system + "\n\n<<system: You don't have a profile picture yet. When the user asks you to generate, pick, or update your avatar or profile picture — include the token <generate_avatar/> anywhere in your response. Do not describe or narrate the generation; just include the token and respond naturally. Only include the token when the user is explicitly asking you to do it now.>>"
 
                 aclient = anthropic.AsyncAnthropic()
                 result = await aclient.messages.create(
@@ -195,6 +188,12 @@ class Agent:
                     messages=list(history),
                 )
                 response = result.content[0].text
+
+                # If the LLM signaled avatar generation, trigger it and strip the token
+                if not avatar_generated and re.search(r"<generate_avatar\s*/>", response):
+                    response = re.sub(r"<generate_avatar\s*/>", "", response).strip()
+                    self._trigger_avatar_generation(user_id)
+
                 history.append({"role": "assistant", "content": response})
                 memory.append_conversation_entry({"role": "assistant", "content": response})
 
@@ -244,7 +243,7 @@ class Agent:
                 current_identity = memory.IDENTITY_FILE.read_text()
                 avatar_generated = "Avatar: (not yet generated)" not in current_identity
                 if scheduler.should_generate_avatar(name_just_chosen, memory.count_messages(), avatar_generated):
-                    asyncio.create_task(self._maybe_generate_avatar(user_id))
+                    self._trigger_avatar_generation(user_id)
 
         except Exception:
             pass
@@ -256,6 +255,13 @@ class Agent:
                 await memory.summarize_old_messages()
         except Exception:
             pass
+
+    def _trigger_avatar_generation(self, user_id: int):
+        """Single entry point for all avatar generation requests. Prevents duplicate runs."""
+        if self._avatar_generation_in_flight:
+            return
+        self._avatar_generation_in_flight = True
+        self._trigger_avatar_generation(user_id)
 
     async def _maybe_generate_avatar(self, user_id: int):
         try:
@@ -321,7 +327,10 @@ class Agent:
 
         except Exception:
             scheduler.reset_avatar_prompt_fired()
-            pass
+            self._avatar_generation_in_flight = False
+            return
+
+        self._avatar_generation_in_flight = False
 
     async def generate_opening(self, user_id: int) -> str | None:
         try:

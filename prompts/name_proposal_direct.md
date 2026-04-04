@@ -1,8 +1,5 @@
-They asked for your name. Give one now.
+If a name hasn't come up yet, slip it in naturally — the way someone would in any conversation.
 
-If something from this conversation could be a name, use it.
-If not, pick something and offer it. Invite their reaction.
+One sentence, in passing. Not a topic.
 
-One or two sentences. Not a big thing.
-
-Example: "what if I went by X" or "call me X for now"
+Example: "I'm X, by the way" or "oh btw I'm X"
