@@ -174,6 +174,19 @@ class Agent:
                     self._pending_name_proposal = False
                     scheduler.consume_name_proposal_pending()
 
+                # Avatar direct-request path
+                avatar_generated = "Avatar: (not yet generated)" not in files["identity"]
+                if not avatar_generated:
+                    msg_lower_av = user_message.lower()
+                    avatar_request = any(p in msg_lower_av for p in [
+                        "get yourself an avatar", "get an avatar", "generate it",
+                        "generate an avatar", "pick an avatar", "make an avatar",
+                        "get a profile picture", "get a picture", "make a profile",
+                        "give yourself a picture",
+                    ])
+                    if avatar_request:
+                        asyncio.create_task(self._maybe_generate_avatar(user_id))
+
                 aclient = anthropic.AsyncAnthropic()
                 result = await aclient.messages.create(
                     model=MODEL,
