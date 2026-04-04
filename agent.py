@@ -279,6 +279,7 @@ class Agent:
                 lambda: urllib.request.urlopen(url).read()
             )
 
+            # Discord edit is the confirmation point — only record success after this
             if self.client is not None:
                 await self.client.user.edit(avatar=avatar_bytes)
 
@@ -290,9 +291,12 @@ class Agent:
                 )
                 memory.write_identity(updated)
 
+            # Both flags set only after Discord confirms — if anything above threw,
+            # avatar_prompt_fired stays False and the trigger retries next exchange
             scheduler.set_avatar_announcement_pending()
 
         except Exception:
+            scheduler.reset_avatar_prompt_fired()
             pass
 
     async def generate_opening(self, user_id: int) -> str | None:

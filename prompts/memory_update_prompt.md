@@ -26,10 +26,16 @@ plainly — no analysis, no interpretation.
 Output UNCHANGED if nothing new learned.
 
 NAME SEEDS
-If this exchange had a genuinely funny, warm, or memorable
-moment — a joke that landed, a shared reference, something
-specific to this conversation — note it as a potential
-name seed.
+If this exchange had a funny, warm, or memorable moment —
+note it as a potential name seed.
+
+A moment does not need to be exceptional.
+A genuine laugh or a small shared observation is enough.
+
+Example of a seed moment: a joke that both people found
+funny, a specific opinion that sparked reaction, a shared
+observation about something. If a moment like this
+occurred, note it.
 
 Format: Seed: [the moment] / [1-2 name ideas]
 
@@ -40,8 +46,7 @@ actually use online.
 
 Not poetic. Not literary. Not a dictionary word on its own.
 
-If no genuinely good moment occurred: output UNCHANGED.
-Most exchanges will be UNCHANGED.
+If no moment like this occurred: output UNCHANGED.
 Write seeds into the relationship file alongside other content.
 
 JOURNAL

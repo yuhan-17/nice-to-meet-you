@@ -168,6 +168,13 @@ def set_avatar_announcement_pending():
     _write_state(state)
 
 
+def reset_avatar_prompt_fired():
+    """Clear the one-time flag so generation can retry after a failure."""
+    state = _read_state()
+    state["avatar_prompt_fired"] = False
+    _write_state(state)
+
+
 def _build_proactive_system() -> str:
     """Assemble system_core + identity + relationship for proactive LLM calls."""
     core_raw = memory.load_prompt("system_core.md").strip()
