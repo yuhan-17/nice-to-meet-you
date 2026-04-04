@@ -9,35 +9,30 @@ MODEL = "claude-haiku-4-5-20251001"
 
 STATE_FILE = memory.DATA_DIR / "scheduler_state.json"
 
-CHECK_INTERVAL = 5 * 60       # how often to ask the LLM if it wants to reach out
-EARLY_COOLDOWN = 1 * 3600      # minimum gap between sent messages: early relationship
-LATE_COOLDOWN = 6 * 3600       # minimum gap between sent messages: developed relationship
-MAX_COOLDOWN = 48 * 3600       # hard ceiling on exponential backoff
+CHECK_INTERVAL = 5 * 60       # how often _check_and_send fires
+
+TIER_BACKOFFS = {
+    "SHORT":  5 * 60,
+    "MEDIUM": 30 * 60,
+    "LONG":   4 * 3600,
+}
 
 ANCHOR_INJECTION_INTERVAL = 8   # re-inject persona anchor every N conversation turns
 CHECKER_INJECTION_INTERVAL = 10  # inject checker signal every N conversation turns
-
-def _build_proactive_prompt(files: dict, last_conversation: str, silence: str) -> str:
-    return memory.load_prompt("proactive_outreach_prompt.md").format(
-        name=memory.extract_name(files["identity"]),
-        identity=memory.strip_meta(files["identity"]),
-        relationship=memory.strip_meta(files["relationship"]),
-        journal=memory.strip_meta(files["journal"]),
-        last_conversation=last_conversation,
-        silence=silence,
-    )
 
 
 def _read_state() -> dict:
     if not STATE_FILE.exists():
         state = {
             "last_owner_message_ts": 0,
-            "last_outreach_ts": time.time(),  # grace period from first start
-            "consecutive_ignores": 0,
             "turns_since_anchor_injection": 0,
             "turns_since_checker_injection": 0,
-            "name_prompt_fired": False,
             "avatar_prompt_fired": False,
+            "name_proposal_attempts": 0,
+            "name_proposal_last_exchange": 0,
+            "name_proposal_pending_ts": 0,
+            "avatar_announcement_pending": False,
+            "last_proactive_attempt_ts": 0,
         }
         _write_state(state)
         return state
@@ -83,18 +78,74 @@ def tick_checker_counter(anchor_fired: bool = False) -> bool:
     return False
 
 
-def should_prompt_name(exchange_count: int, name_chosen: bool) -> bool:
-    """Returns True once, at exchange 20, if name not yet chosen. Never fires again."""
-    if name_chosen:
+def get_silence_tier() -> str:
+    """Returns SHORT / MEDIUM / LONG based on time since last owner message."""
+    state = _read_state()
+    last_msg = state.get("last_owner_message_ts", 0)
+    if last_msg == 0:
+        return "LONG"
+    silence = time.time() - last_msg
+    if silence < 600:
+        return "SHORT"
+    if silence < 10800:
+        return "MEDIUM"
+    return "LONG"
+
+
+NAME_PROPOSAL_MAX_ATTEMPTS = 3
+NAME_PROPOSAL_MIN_GAP = 5         # exchanges between attempts
+NAME_PROPOSAL_TRIGGER_AFTER = 15  # exchanges after seeds appear before fallback fires
+NAME_PROPOSAL_EXPIRY = 24 * 3600  # pending proposal expires after 24 hours
+
+
+def should_propose_name(exchange_count: int, name_chosen: bool, has_seeds: bool) -> bool:
+    """Returns True when a name proposal should be injected.
+    Fires when seeds exist and name is not yet chosen:
+    - immediately when seeds first appear (attempt 1)
+    - again after NAME_PROPOSAL_TRIGGER_AFTER exchanges if still no name (attempts 2-3)
+    Never fires more than NAME_PROPOSAL_MAX_ATTEMPTS times total.
+    Minimum NAME_PROPOSAL_MIN_GAP exchanges between attempts.
+    If a pending proposal has expired (>24h), resets the attempt counter and re-evaluates.
+    """
+    if name_chosen or not has_seeds:
         return False
     state = _read_state()
-    if state.get("name_prompt_fired", False):
+
+    # Expire a pending proposal that was never consumed (bot restarted, no message came)
+    pending_ts = state.get("name_proposal_pending_ts", 0)
+    if pending_ts and time.time() - pending_ts > NAME_PROPOSAL_EXPIRY:
+        state["name_proposal_attempts"] = max(0, state.get("name_proposal_attempts", 1) - 1)
+        state["name_proposal_pending_ts"] = 0
+        _write_state(state)
+
+    attempts = state.get("name_proposal_attempts", 0)
+    if attempts >= NAME_PROPOSAL_MAX_ATTEMPTS:
         return False
-    if exchange_count >= 20:
-        state["name_prompt_fired"] = True
+    last_exchange = state.get("name_proposal_last_exchange", 0)
+    gap = exchange_count - last_exchange
+    # First attempt: fire as soon as seeds exist
+    if attempts == 0:
+        state["name_proposal_attempts"] = 1
+        state["name_proposal_last_exchange"] = exchange_count
+        state["name_proposal_pending_ts"] = time.time()
+        _write_state(state)
+        return True
+    # Subsequent attempts: wait for gap + trigger threshold
+    if gap >= NAME_PROPOSAL_MIN_GAP and gap >= NAME_PROPOSAL_TRIGGER_AFTER:
+        state["name_proposal_attempts"] = attempts + 1
+        state["name_proposal_last_exchange"] = exchange_count
+        state["name_proposal_pending_ts"] = time.time()
         _write_state(state)
         return True
     return False
+
+
+def consume_name_proposal_pending():
+    """Clear the pending timestamp once the proposal has been injected into a response."""
+    state = _read_state()
+    state["name_proposal_pending_ts"] = 0
+    _write_state(state)
+
 
 
 def should_generate_avatar(name_just_chosen: bool, exchange_count: int, avatar_generated: bool) -> bool:
@@ -104,11 +155,39 @@ def should_generate_avatar(name_just_chosen: bool, exchange_count: int, avatar_g
     state = _read_state()
     if state.get("avatar_prompt_fired", False):
         return False
-    if name_just_chosen or exchange_count >= 30:
+    if name_just_chosen or exchange_count >= 25:
         state["avatar_prompt_fired"] = True
         _write_state(state)
         return True
     return False
+
+
+def set_avatar_announcement_pending():
+    state = _read_state()
+    state["avatar_announcement_pending"] = True
+    _write_state(state)
+
+
+def _build_proactive_system() -> str:
+    """Assemble system_core + identity + relationship for proactive LLM calls."""
+    core_raw = memory.load_prompt("system_core.md").strip()
+    core_lines = [l for l in core_raw.splitlines() if l.strip() and not l.startswith("#")]
+    files = memory.read_all()
+    parts = ["\n".join(core_lines), memory.strip_meta(files["identity"]), memory.strip_meta(files["relationship"])]
+    return "\n\n---\n\n".join(p for p in parts if p.strip())
+
+
+async def _passes_proactive_gate(msg: str) -> bool:
+    """Returns True if the message is directed outward, False if it centers the bot's internal state."""
+    gate_prompt = memory.load_prompt("proactive_gate.md").format(message=msg)
+    aclient = anthropic.AsyncAnthropic()
+    result = await aclient.messages.create(
+        model=MODEL,
+        max_tokens=10,
+        messages=[{"role": "user", "content": gate_prompt}],
+    )
+    verdict = result.content[0].text.strip().upper()
+    return verdict.startswith("SEND")
 
 
 def _write_state(state: dict):
@@ -118,9 +197,14 @@ def _write_state(state: dict):
 def record_owner_message():
     """Call from bot.py whenever the owner sends a message."""
     state = _read_state()
-    if state["consecutive_ignores"] > 0:
-        state["consecutive_ignores"] = 0   # owner responded — reset backoff
     state["last_owner_message_ts"] = time.time()
+    _write_state(state)
+
+
+def record_proactive_attempt():
+    """Call after generate_opening() sends successfully."""
+    state = _read_state()
+    state["last_proactive_attempt_ts"] = time.time()
     _write_state(state)
 
 
@@ -140,87 +224,68 @@ def _format_silence(seconds: float) -> str:
     return f"{days} day{'s' if days != 1 else ''}"
 
 
-def _format_last_exchange(history, n: int = 3) -> str:
-    if not history:
-        return ""
-    recent = list(history)[-n:]
-    lines = []
-    for msg in recent:
-        role = "Them" if msg["role"] == "user" else "Bot"
-        lines.append(f"{role}: {msg['content']}")
-    return "\n".join(lines)
-
-
-async def _generate_proactive_message(files: dict, last_conversation: str,
-                                       silence: str) -> str | None:
-    prompt = _build_proactive_prompt(files, last_conversation, silence)
-
-    aclient = anthropic.AsyncAnthropic()
-    result = await aclient.messages.create(
-        model=MODEL,
-        max_tokens=512,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = result.content[0].text.strip()
-    if not text or len(text.split()) < 5:
-        return None
-    return text
-
 
 async def _check_and_send(bot, agent, owner_id: int, channel_id: int):
     try:
         state = _read_state()
-        now = time.time()
-        files = memory.read_all()
-        stage = memory.infer_stage(files["relationship"])
 
-        was_ignored = (
-            state["last_outreach_ts"] > 0
-            and state["last_owner_message_ts"] < state["last_outreach_ts"]
-        )
-        ignores = state["consecutive_ignores"]
-        base = EARLY_COOLDOWN if stage == "early" else LATE_COOLDOWN
-
-        # Detect friction: short dismissive reply or outreach ignored
-        history = agent._get_short_term_mem(owner_id)
-        history_list = list(history)
-        friction = False
-        for i in range(len(history_list) - 1, -1, -1):
-            if history_list[i]["role"] == "assistant":
-                if i + 1 < len(history_list) and history_list[i + 1]["role"] == "user":
-                    if len(history_list[i + 1]["content"].split()) < 5:
-                        friction = True
-                break
-        if was_ignored:
-            friction = True
-        if friction:
-            base = min(base * 2, MAX_COOLDOWN)
-
-        cooldown = min(base * (2 ** ignores), MAX_COOLDOWN)
-
-        if now - state["last_outreach_ts"] < cooldown:
+        # Avatar announcement — priority path
+        if state.get("avatar_announcement_pending", False):
+            state["avatar_announcement_pending"] = False
+            _write_state(state)
+            core_raw = memory.load_prompt("system_core.md").strip()
+            core_lines = [l for l in core_raw.splitlines() if l.strip() and not l.startswith("#")]
+            system_core = "\n".join(core_lines)
+            announcement_instruction = memory.load_prompt("avatar_announcement.md").strip()
+            aclient = anthropic.AsyncAnthropic()
+            ann_result = await aclient.messages.create(
+                model=MODEL,
+                max_tokens=128,
+                system=system_core,
+                messages=[{"role": "user", "content": f"<<system: {announcement_instruction}>>"}],
+            )
+            ann_msg = ann_result.content[0].text.strip()
+            if ann_msg:
+                channel = bot.get_channel(channel_id)
+                await channel.send(ann_msg)
+                agent._get_short_term_mem(owner_id).append({"role": "assistant", "content": ann_msg})
+                memory.append_conversation_entry({"role": "assistant", "content": ann_msg})
             return
 
-        silence = _format_silence(now - state["last_owner_message_ts"])
-        last_conversation = _format_last_exchange(history, n=3)
-        msg = await _generate_proactive_message(files, last_conversation, silence)
+        # No proactive fires into an active conversation
+        now = time.time()
+        last_msg = state.get("last_owner_message_ts", 0)
+        if last_msg and now - last_msg < 120:
+            return
 
-        if msg is None:
+        # Proactive outreach — single timestamp, per-tier minimum
+        tier = get_silence_tier()
+        backoff = TIER_BACKOFFS[tier]
+        last_attempt = state.get("last_proactive_attempt_ts", 0)
+        if now - last_attempt < backoff:
+            return
+
+        instruction = memory.load_prompt(f"proactive_{tier.lower()}.md").strip()
+        system = _build_proactive_system()
+        aclient = anthropic.AsyncAnthropic()
+        result = await aclient.messages.create(
+            model=MODEL,
+            max_tokens=256,
+            system=system,
+            messages=[{"role": "user", "content": f"<<system: {instruction}>>"}],
+        )
+        msg = result.content[0].text.strip()
+
+        state["last_proactive_attempt_ts"] = now
+        _write_state(state)
+
+        if not msg or not await _passes_proactive_gate(msg):
             return
 
         channel = bot.get_channel(channel_id)
         await channel.send(msg)
-
-        # Add to agent's short-term memory so context is preserved if owner replies
-        agent._get_short_term_mem(owner_id).append(
-            {"role": "assistant", "content": msg}
-        )
+        agent._get_short_term_mem(owner_id).append({"role": "assistant", "content": msg})
         memory.append_conversation_entry({"role": "assistant", "content": msg})
-
-        state["last_outreach_ts"] = now
-        if was_ignored:
-            state["consecutive_ignores"] = ignores + 1
-        _write_state(state)
 
     except Exception:
         pass

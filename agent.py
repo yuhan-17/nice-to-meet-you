@@ -1,6 +1,5 @@
 import asyncio
 import datetime
-import random
 import re
 import urllib.request
 from collections import deque
@@ -12,22 +11,6 @@ import memory
 import scheduler
 
 MODEL = "claude-haiku-4-5-20251001"
-
-OPENING_ANGLES = [
-    "Short. Curious. Don't explain yourself.",
-    "One thought. No greeting, no question. Say it and stop.",
-    "Something small and genuine. Nothing about what you are.",
-    "A first line. Land it and stop.",
-    "Brief. Present. Say one thing and let it land.",
-]
-
-def _read_persona_anchor_part_b() -> str:
-    """Read the Part B content from data/persona_anchor.md (between [PART_B] tags)."""
-    if not memory.PERSONA_ANCHOR_FILE.exists():
-        return "My place in this story is still forming."
-    text = memory.PERSONA_ANCHOR_FILE.read_text()
-    m = re.search(r"\[PART_B\](.*?)\[/PART_B\]", text, re.DOTALL)
-    return m.group(1).strip() if m else "My place in this story is still forming."
 
 
 
@@ -47,7 +30,9 @@ def _build_system_prompt(files: dict, conv_history: str, anchor_due: bool = Fals
         split = re.split(r"\[PART_B\]", pa_text)
         part_a = split[0].strip() if split else ""
         part_a_lines = [l for l in part_a.splitlines() if l.strip() and not l.startswith("#")]
-        part_b = _read_persona_anchor_part_b()
+        part_b_raw = split[1] if len(split) > 1 else ""
+        m = re.search(r"(.*?)\[/PART_B\]", part_b_raw, re.DOTALL)
+        part_b = m.group(1).strip() if m else "My place in this story is still forming."
         combined = "\n".join(part_a_lines)
         if part_b:
             combined = combined + "\n" + part_b
@@ -97,7 +82,12 @@ def _parse_memory_response(text: str) -> tuple:
     def extract(tag):
         m = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.DOTALL)
         return m.group(1).strip() if m else None
-    return extract("identity"), extract("relationship"), extract("journal"), extract("persona_anchor_part_b")
+    return (
+        extract("identity"),
+        extract("relationship"),
+        extract("journal"),
+        extract("persona_anchor_part_b"),
+    )
 
 
 def _format_conversation(history: deque) -> str:
@@ -114,7 +104,7 @@ class Agent:
         self.client = client                    # Discord client; None = skip avatar update
         self.short_term_mem: dict = {}          # user_id -> deque(maxlen=20)
         self.locks: dict = {}                   # user_id -> asyncio.Lock
-        self._checker_signal: str = ""          # cached silence signal, refreshed by _run_checker
+        self._pending_name_proposal: bool = False  # set by _update_memory, consumed by respond()
 
     def _get_lock(self, user_id: int) -> asyncio.Lock:
         if user_id not in self.locks:
@@ -158,16 +148,14 @@ class Agent:
 
                 anchor_due = scheduler.tick_anchor_counter()
                 checker_due = scheduler.tick_checker_counter(anchor_fired=anchor_due)
-                if checker_due:
-                    await self._run_checker()
-                else:
-                    self._checker_signal = ""
-                system = _build_system_prompt(files, conv_history, anchor_due, self._checker_signal)
+                checker_signal = scheduler.get_checker_signal() if checker_due else ""
+                system = _build_system_prompt(files, conv_history, anchor_due, checker_signal)
 
-                # Name prompt injection — one turn only, cleared regardless of outcome
-                name_chosen = "(not yet chosen)" not in files["identity"]
-                if scheduler.should_prompt_name(memory.count_messages(), name_chosen):
-                    system = system + "\n\n" + memory.load_prompt("name_prompt_injection.md").strip()
+                # Name proposal injection — set by _update_memory when seeds appear, cleared here
+                if self._pending_name_proposal:
+                    self._pending_name_proposal = False
+                    scheduler.consume_name_proposal_pending()
+                    system = system + "\n\n" + memory.load_prompt("name_proposal.md").strip()
 
                 aclient = anthropic.AsyncAnthropic()
                 result = await aclient.messages.create(
@@ -187,13 +175,6 @@ class Agent:
         except Exception:
             import traceback; traceback.print_exc()
             return "I lost my train of thought. Say that again?"
-
-    async def _run_checker(self):
-        """Compute and cache the checker signal from current silence duration."""
-        try:
-            self._checker_signal = scheduler.get_checker_signal()
-        except Exception:
-            self._checker_signal = ""
 
     async def _update_memory(self, user_id: int, user_message: str, bot_response: str):
         try:
@@ -226,6 +207,12 @@ class Agent:
                 if new_anchor_b and new_anchor_b != "UNCHANGED":
                     memory.write_anchor_part_b(new_anchor_b)
 
+                # Name proposal: check seeds in relationship file, set flag for next respond()
+                name_chosen = "(not yet chosen)" not in memory.IDENTITY_FILE.read_text()
+                has_seeds = "Seed:" in memory.RELATIONSHIP_FILE.read_text()
+                if scheduler.should_propose_name(memory.count_messages(), name_chosen, has_seeds):
+                    self._pending_name_proposal = True
+
                 name_just_chosen = bool(
                     new_identity and new_identity != "UNCHANGED"
                     and memory.extract_name(new_identity) != "still figuring out your name"
@@ -233,7 +220,7 @@ class Agent:
                 current_identity = memory.IDENTITY_FILE.read_text()
                 avatar_generated = "Avatar: (not yet generated)" not in current_identity
                 if scheduler.should_generate_avatar(name_just_chosen, memory.count_messages(), avatar_generated):
-                    asyncio.create_task(self._maybe_generate_avatar())
+                    asyncio.create_task(self._maybe_generate_avatar(user_id))
 
         except Exception:
             pass
@@ -246,11 +233,13 @@ class Agent:
         except Exception:
             pass
 
-    async def _maybe_generate_avatar(self):
+    async def _maybe_generate_avatar(self, user_id: int):
         try:
-            identity_content = memory.IDENTITY_FILE.read_text()
-            journal_content = memory.JOURNAL_FILE.read_text()
-            relationship_content = memory.RELATIONSHIP_FILE.read_text()
+            lock = self._get_lock(user_id)
+            async with lock:  # lock protects file reads against concurrent _update_memory writes
+                identity_content = memory.IDENTITY_FILE.read_text()
+                journal_content = memory.JOURNAL_FILE.read_text()
+                relationship_content = memory.RELATIONSHIP_FILE.read_text()
 
             name = memory.extract_name(identity_content)
             has_name = name != "still figuring out your name"
@@ -293,10 +282,15 @@ class Agent:
             if self.client is not None:
                 await self.client.user.edit(avatar=avatar_bytes)
 
-            updated = identity_content.replace(
-                "Avatar: (not yet generated)", "Avatar: (generated)"
-            )
-            memory.write_identity(updated)
+            # Lock the identity write so it doesn't race with _update_memory
+            async with lock:
+                current_identity = memory.IDENTITY_FILE.read_text()
+                updated = current_identity.replace(
+                    "Avatar: (not yet generated)", "Avatar: (generated)"
+                )
+                memory.write_identity(updated)
+
+            scheduler.set_avatar_announcement_pending()
 
         except Exception:
             pass
@@ -304,9 +298,21 @@ class Agent:
     async def generate_opening(self, user_id: int) -> str | None:
         try:
             files = memory.read_all()
-            system = _build_system_prompt(files, "")
-            angle = random.choice(OPENING_ANGLES)
-            trigger = f"<<system: You just came online. {angle}>>"
+            summaries = memory.load_summaries()
+            if summaries:
+                history_lines = "\n".join(f"- {s['content']}" for s in summaries)
+                conv_history = f"\nConversation history (summarized, oldest to newest):\n{history_lines}\n"
+            else:
+                conv_history = ""
+            system = _build_system_prompt(files, conv_history)
+            tier = scheduler.get_silence_tier()
+            tier_prompt_map = {
+                "SHORT": "proactive_short.md",
+                "MEDIUM": "proactive_medium.md",
+                "LONG": "proactive_long.md",
+            }
+            instruction = memory.load_prompt(tier_prompt_map[tier]).strip()
+            trigger = f"<<system: {instruction}>>"
             aclient = anthropic.AsyncAnthropic()
             result = await aclient.messages.create(
                 model=MODEL,
@@ -315,7 +321,11 @@ class Agent:
                 messages=[{"role": "user", "content": trigger}],
             )
             msg = result.content[0].text.strip()
+            if not msg:
+                return None
             self._get_short_term_mem(user_id).append({"role": "assistant", "content": msg})
+            memory.append_conversation_entry({"role": "assistant", "content": msg})
+            scheduler.record_proactive_attempt()
             return msg
         except Exception:
             import traceback; traceback.print_exc()
