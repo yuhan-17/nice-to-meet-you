@@ -28,9 +28,7 @@ def _read_state() -> dict:
             "turns_since_anchor_injection": 0,
             "turns_since_checker_injection": 0,
             "avatar_prompt_fired": False,
-            "name_proposal_attempts": 0,
-            "name_proposal_last_exchange": 0,
-            "name_proposal_pending_ts": 0,
+            "name_proactive_fired": False,
             "avatar_announcement_pending": False,
             "last_proactive_attempt_ts": 0,
         }
@@ -92,59 +90,26 @@ def get_silence_tier() -> str:
     return "LONG"
 
 
-NAME_PROPOSAL_MAX_ATTEMPTS = 3
-NAME_PROPOSAL_MIN_GAP = 5         # exchanges between attempts
-NAME_PROPOSAL_TRIGGER_AFTER = 15  # exchanges after seeds appear before fallback fires
-NAME_PROPOSAL_EXPIRY = 24 * 3600  # pending proposal expires after 24 hours
+def consume_name_proposal_pending():
+    """Clear the in-memory flag without writing state — seeds path is disabled."""
+    pass
 
 
-def should_propose_name(exchange_count: int, name_chosen: bool, has_seeds: bool) -> bool:
-    """Returns True when a name proposal should be injected.
-    Fires when seeds exist and name is not yet chosen:
-    - immediately when seeds first appear (attempt 1)
-    - again after NAME_PROPOSAL_TRIGGER_AFTER exchanges if still no name (attempts 2-3)
-    Never fires more than NAME_PROPOSAL_MAX_ATTEMPTS times total.
-    Minimum NAME_PROPOSAL_MIN_GAP exchanges between attempts.
-    If a pending proposal has expired (>24h), resets the attempt counter and re-evaluates.
-    """
-    if name_chosen or not has_seeds:
+NAME_PROACTIVE_THRESHOLD = 20  # raw messages before proactive name raise fires
+
+
+def should_proactively_propose_name(message_count: int, name_chosen: bool) -> bool:
+    """Returns True once, after NAME_PROACTIVE_THRESHOLD messages, if name still not chosen."""
+    if name_chosen:
         return False
     state = _read_state()
-
-    # Expire a pending proposal that was never consumed (bot restarted, no message came)
-    pending_ts = state.get("name_proposal_pending_ts", 0)
-    if pending_ts and time.time() - pending_ts > NAME_PROPOSAL_EXPIRY:
-        state["name_proposal_attempts"] = max(0, state.get("name_proposal_attempts", 1) - 1)
-        state["name_proposal_pending_ts"] = 0
-        _write_state(state)
-
-    attempts = state.get("name_proposal_attempts", 0)
-    if attempts >= NAME_PROPOSAL_MAX_ATTEMPTS:
+    if state.get("name_proactive_fired", False):
         return False
-    last_exchange = state.get("name_proposal_last_exchange", 0)
-    gap = exchange_count - last_exchange
-    # First attempt: fire as soon as seeds exist
-    if attempts == 0:
-        state["name_proposal_attempts"] = 1
-        state["name_proposal_last_exchange"] = exchange_count
-        state["name_proposal_pending_ts"] = time.time()
-        _write_state(state)
-        return True
-    # Subsequent attempts: wait for gap + trigger threshold
-    if gap >= NAME_PROPOSAL_MIN_GAP and gap >= NAME_PROPOSAL_TRIGGER_AFTER:
-        state["name_proposal_attempts"] = attempts + 1
-        state["name_proposal_last_exchange"] = exchange_count
-        state["name_proposal_pending_ts"] = time.time()
+    if message_count >= NAME_PROACTIVE_THRESHOLD:
+        state["name_proactive_fired"] = True
         _write_state(state)
         return True
     return False
-
-
-def consume_name_proposal_pending():
-    """Clear the pending timestamp once the proposal has been injected into a response."""
-    state = _read_state()
-    state["name_proposal_pending_ts"] = 0
-    _write_state(state)
 
 
 
@@ -155,7 +120,7 @@ def should_generate_avatar(name_just_chosen: bool, exchange_count: int, avatar_g
     state = _read_state()
     if state.get("avatar_prompt_fired", False):
         return False
-    if name_just_chosen or exchange_count >= 25:
+    if name_just_chosen or exchange_count >= 10:
         state["avatar_prompt_fired"] = True
         _write_state(state)
         return True

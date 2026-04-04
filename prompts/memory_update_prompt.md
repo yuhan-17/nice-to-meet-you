@@ -23,6 +23,8 @@ their life, what they care about, and how they communicate —
 their humor, directness, what they find annoying, how they push
 back. Keep what's already there unless contradicted. Write
 plainly — no analysis, no interpretation.
+If a name was discussed in this exchange — proposed, questioned,
+or reacted to — note it here, even if the name was not confirmed.
 Output UNCHANGED if nothing new learned.
 
 NAME SEEDS

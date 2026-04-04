@@ -151,11 +151,28 @@ class Agent:
                 checker_signal = scheduler.get_checker_signal() if checker_due else ""
                 system = _build_system_prompt(files, conv_history, anchor_due, checker_signal)
 
-                # Name proposal injection — set by _update_memory when seeds appear, cleared here
+                # Name injection — reactive and proactive paths
+                # Seeds (if any) are in the relationship context and enrich whichever fires
+                name_chosen = "(not yet chosen)" not in files["identity"]
+                if not name_chosen:
+                    msg_lower = user_message.lower()
+                    direct_ask = any(p in msg_lower for p in [
+                        "what's your name", "what is your name", "your name",
+                        "do you have a name", "pick a name", "choose a name",
+                        "call yourself", "what should i call you", "who are you",
+                    ])
+                    name_exchange = any(p in msg_lower for p in [
+                        "i'm ", "i am ", "my name is ", "call me ", "name's ",
+                    ])
+                    if direct_ask or name_exchange:
+                        system = system + "\n\n" + memory.load_prompt("name_proposal_direct.md").strip()
+                    elif scheduler.should_proactively_propose_name(memory.count_messages(), name_chosen):
+                        system = system + "\n\n" + memory.load_prompt("name_proactive.md").strip()
+
+                # Seed-based proposal flag — cleared without firing (seeds enrich direct-ask path)
                 if self._pending_name_proposal:
                     self._pending_name_proposal = False
                     scheduler.consume_name_proposal_pending()
-                    system = system + "\n\n" + memory.load_prompt("name_proposal.md").strip()
 
                 aclient = anthropic.AsyncAnthropic()
                 result = await aclient.messages.create(
@@ -206,12 +223,6 @@ class Agent:
                     memory.write_journal(new_journal)
                 if new_anchor_b and new_anchor_b != "UNCHANGED":
                     memory.write_anchor_part_b(new_anchor_b)
-
-                # Name proposal: check seeds in relationship file, set flag for next respond()
-                name_chosen = "(not yet chosen)" not in memory.IDENTITY_FILE.read_text()
-                has_seeds = "Seed:" in memory.RELATIONSHIP_FILE.read_text()
-                if scheduler.should_propose_name(memory.count_messages(), name_chosen, has_seeds):
-                    self._pending_name_proposal = True
 
                 name_just_chosen = bool(
                     new_identity and new_identity != "UNCHANGED"
