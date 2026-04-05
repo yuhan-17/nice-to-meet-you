@@ -202,6 +202,7 @@ async def _check_and_send(bot, agent, owner_id: int, channel_id: int):
         result = await aclient.messages.create(
             model=MODEL,
             max_tokens=256,
+            temperature=1,
             system=system,
             messages=[{"role": "user", "content": f"<<system: {instruction}>>"}],
         )

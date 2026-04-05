@@ -395,11 +395,12 @@ class Agent:
             files = memory.read_all()
             conv_history = memory.format_summary_history()
             system = _build_system_prompt(files, conv_history)
-            instruction = "You just arrived. Say something to open a conversation with someone you haven't met yet. One sentence. Keep it natural — not a formal introduction."
+            instruction = "You just arrived and are meeting someone for the first time. Say hi and something to get the conversation going. Keep it natural and short."
             aclient = anthropic.AsyncAnthropic()
             result = await aclient.messages.create(
                 model=MODEL,
                 max_tokens=256,
+                temperature=1,
                 system=system,
                 messages=[{"role": "user", "content": f"<<system: {instruction}>>"}],
             )
