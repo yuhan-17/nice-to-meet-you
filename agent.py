@@ -395,7 +395,7 @@ class Agent:
             files = memory.read_all()
             conv_history = memory.format_summary_history()
             system = _build_system_prompt(files, conv_history)
-            instruction = memory.load_prompt("proactive.md").format(silence="a while").strip()
+            instruction = "You just arrived. Say something to open a conversation with someone you haven't met yet. One sentence. Keep it natural — not a formal introduction."
             aclient = anthropic.AsyncAnthropic()
             result = await aclient.messages.create(
                 model=MODEL,
