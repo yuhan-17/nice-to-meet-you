@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import re
+import traceback
 import urllib.request
 from collections import deque
 
@@ -10,22 +11,17 @@ import openai
 import memory
 import scheduler
 
-MODEL = "claude-sonnet-4-6"
+MODEL = memory.MODEL
 
 TOOLS = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
 
-CAPABILITIES_PROMPT = """<<system: You have a capability you can invoke in your response:
-
-Generate an image: include <generate_image prompt="a detailed DALL-E description"/> anywhere in your response. Use this when the user asks you to draw, create, or generate an image. Write a descriptive prompt. Don't narrate or describe the generation — just include the tag and respond naturally.>>"""
 
 
-def _build_system_prompt(files: dict, conv_history: str, anchor_due: bool = False, checker_signal: str = "") -> str:
+def _build_system_prompt(files: dict, conv_history: str, anchor_due: bool = False, context_signal: str = "") -> str:
     template = memory.load_prompt("runtime_system_prompt.md")
 
-    # system_core: include only if there's content beyond the header
-    core_raw = memory.load_prompt("system_core.md").strip()
-    core_lines = [l for l in core_raw.splitlines() if l.strip() and not l.startswith("#")]
-    system_core = "\n" + "\n".join(core_lines) if core_lines else ""
+    core = memory.load_system_core()
+    system_core = "\n" + core if core else ""
 
     # persona_anchor: inject Part A + Part B together when due
     persona_anchor_if_due = ""
@@ -50,7 +46,7 @@ def _build_system_prompt(files: dict, conv_history: str, anchor_due: bool = Fals
         identity=memory.strip_meta(files["identity"]),
         relationship=memory.strip_meta(files["relationship"]),
         conversation_history=conv_history,
-        checker_signal=checker_signal,
+        context_signal=context_signal,
     )
 
 
@@ -119,8 +115,8 @@ class Agent:
         self.client = client                    # Discord client; None = skip avatar update
         self.short_term_mem: dict = {}          # user_id -> deque(maxlen=20)
         self.locks: dict = {}                   # user_id -> asyncio.Lock
-        self._pending_name_proposal: bool = False  # set by _update_memory, consumed by respond()
         self._avatar_generation_in_flight: bool = False  # prevents duplicate concurrent generations
+        self._last_nick: str | None = None               # last nickname pushed to Discord
 
     def _get_lock(self, user_id: int) -> asyncio.Lock:
         if user_id not in self.locks:
@@ -172,20 +168,14 @@ class Agent:
                 history.append({"role": "user", "content": user_message})
                 memory.append_conversation_entry({"role": "user", "content": user_message})
 
-                summaries = memory.load_summaries()
-                if summaries:
-                    history_lines = "\n".join(f"- {s['content']}" for s in summaries)
-                    conv_history = f"\nConversation history (summarized, oldest to newest):\n{history_lines}\n"
-                else:
-                    conv_history = ""
+                conv_history = memory.format_summary_history()
 
                 anchor_due = scheduler.tick_anchor_counter()
-                checker_due = scheduler.tick_checker_counter(anchor_fired=anchor_due)
-                checker_signal = scheduler.get_checker_signal() if checker_due else ""
-                system = _build_system_prompt(files, conv_history, anchor_due, checker_signal)
+                return_context = scheduler.get_return_context()
+                system = _build_system_prompt(files, conv_history, anchor_due, return_context)
 
                 # Name injection — reactive and proactive paths
-                name_chosen = "(not yet chosen)" not in files["identity"]
+                name_chosen = memory.extract_name(files["identity"]) != "still figuring out your name"
                 if not name_chosen:
                     msg_lower = user_message.lower()
                     name_relevant = any(p in msg_lower for p in [
@@ -194,21 +184,16 @@ class Agent:
                         "call yourself", "what should i call you", "who are you",
                         "my name is ", "call me ", "name's ",
                     ])
-                    if name_relevant or scheduler.should_proactively_propose_name(memory.count_messages(), name_chosen):
-                        system = system + "\n\n" + memory.load_prompt("name_proposal.md").strip()
-
-                # Seed-based proposal flag — cleared without firing
-                if self._pending_name_proposal:
-                    self._pending_name_proposal = False
-                    scheduler.consume_name_proposal_pending()
+                    proactive = not name_relevant and scheduler.should_proactively_propose_name(memory.count_messages(), name_chosen)
+                    if name_relevant:
+                        system = system + "\n\n" + memory.load_prompt("name_proposal.md", "REACTIVE")
+                    elif proactive:
+                        system = system + "\n\n" + memory.load_prompt("name_proposal.md", "PROACTIVE")
 
                 # Avatar signal — inject instruction when not yet generated so LLM can self-trigger
                 avatar_generated = "Avatar: (not yet generated)" not in files["identity"]
                 if not avatar_generated:
-                    system = system + "\n\n<<system: You don't have a profile picture yet. If it comes up naturally or the user asks — include <generate_avatar/> in your response to set one. Have an idea of what you'd want it to look like, but don't explain unless asked. Don't narrate the generation. Just include the token and respond naturally.>>"
-
-                # Image generation capability always available
-                system = system + "\n\n" + CAPABILITIES_PROMPT
+                    system = system + "\n\n" + memory.load_prompt("avatar_announcement.md", "SIGNAL")
 
                 # Build messages — replace last user entry with multimodal content if needed
                 api_messages = list(history)[:-1] + [{"role": "user", "content": user_content}]
@@ -244,7 +229,7 @@ class Agent:
             return response, image_bytes
 
         except Exception:
-            import traceback; traceback.print_exc()
+            traceback.print_exc()
             return "I lost my train of thought. Say that again?", None
 
     async def _generate_image(self, prompt: str) -> bytes | None:
@@ -260,7 +245,7 @@ class Agent:
             url = result.data[0].url
             return await asyncio.to_thread(lambda: urllib.request.urlopen(url).read())
         except Exception:
-            import traceback; traceback.print_exc()
+            traceback.print_exc()
             return None
 
     async def _update_memory(self, user_id: int, user_message: str, bot_response: str):
@@ -286,7 +271,11 @@ class Agent:
 
                 if new_identity and new_identity != "UNCHANGED":
                     memory.write_identity(new_identity)
+                    name = memory.extract_name(new_identity)
                     _maybe_update_anchor_name(new_identity)
+                    await self._update_discord_nickname(name)
+                else:
+                    name = None
                 if new_relationship and new_relationship != "UNCHANGED":
                     memory.write_relationship(new_relationship)
                 if new_journal and new_journal != "UNCHANGED":
@@ -295,8 +284,7 @@ class Agent:
                     memory.write_anchor_part_b(new_anchor_b)
 
                 name_just_chosen = bool(
-                    new_identity and new_identity != "UNCHANGED"
-                    and memory.extract_name(new_identity) != "still figuring out your name"
+                    name and name != "still figuring out your name"
                 )
                 current_identity = memory.IDENTITY_FILE.read_text()
                 avatar_generated = "Avatar: (not yet generated)" not in current_identity
@@ -311,6 +299,22 @@ class Agent:
             lock = self._get_lock(user_id)
             async with lock:
                 await memory.summarize_old_messages()
+        except Exception:
+            pass
+
+    async def _update_discord_nickname(self, name: str):
+        """Update the bot's server nickname to match its chosen name."""
+        if self.client is None:
+            return
+        if name == "still figuring out your name":
+            return
+        nick = name[:32]
+        if nick == self._last_nick:
+            return
+        try:
+            for guild in self.client.guilds:
+                await guild.me.edit(nick=nick)
+            self._last_nick = nick
         except Exception:
             pass
 
@@ -379,6 +383,7 @@ class Agent:
             scheduler.set_avatar_announcement_pending()
 
         except Exception:
+            traceback.print_exc()
             scheduler.reset_avatar_prompt_fired()
             self._avatar_generation_in_flight = False
             return
@@ -388,12 +393,7 @@ class Agent:
     async def generate_opening(self, user_id: int) -> str | None:
         try:
             files = memory.read_all()
-            summaries = memory.load_summaries()
-            if summaries:
-                history_lines = "\n".join(f"- {s['content']}" for s in summaries)
-                conv_history = f"\nConversation history (summarized, oldest to newest):\n{history_lines}\n"
-            else:
-                conv_history = ""
+            conv_history = memory.format_summary_history()
             system = _build_system_prompt(files, conv_history)
             instruction = memory.load_prompt("proactive.md").format(silence="a while").strip()
             aclient = anthropic.AsyncAnthropic()
@@ -410,5 +410,5 @@ class Agent:
             memory.append_conversation_entry({"role": "assistant", "content": msg})
             return msg
         except Exception:
-            import traceback; traceback.print_exc()
+            traceback.print_exc()
             return None

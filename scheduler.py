@@ -5,27 +5,30 @@ import anthropic
 
 import memory
 
-MODEL = "claude-sonnet-4-6"
+MODEL = memory.MODEL
 
 STATE_FILE = memory.DATA_DIR / "scheduler_state.json"
 
 CHECK_INTERVAL = 10 * 60         # how often the loop fires
-PROACTIVE_MIN_INTERVAL = 30 * 60  # minimum gap between proactive messages
 
 ANCHOR_INJECTION_INTERVAL = 8   # re-inject persona anchor every N conversation turns
-CHECKER_INJECTION_INTERVAL = 10  # inject checker signal every N conversation turns
+
+
+PROACTIVE_BASE_INTERVAL = 30 * 60    # 30 min base between proactive messages
+PROACTIVE_MAX_INTERVAL = 4 * 3600    # cap at 4 hours
 
 
 def _read_state() -> dict:
     if not STATE_FILE.exists():
         state = {
             "last_owner_message_ts": 0,
+            "last_silence_gap": 0,
             "turns_since_anchor_injection": 0,
-            "turns_since_checker_injection": 0,
             "avatar_prompt_fired": False,
             "name_proactive_fired": False,
             "avatar_announcement_pending": False,
             "last_proactive_attempt_ts": 0,
+            "consecutive_unanswered_proactive": 0,
         }
         _write_state(state)
         return state
@@ -36,17 +39,15 @@ def _write_state(state: dict):
     STATE_FILE.write_text(json.dumps(state))
 
 
-# --- Anchor / checker injection (quality mechanisms, not proactive outreach) ---
+# --- Anchor injection + return-from-silence context ---
 
-def get_checker_signal() -> str:
+def get_return_context() -> str:
+    """If the user just returned after 30+ min of silence, note it."""
     state = _read_state()
-    last_msg = state.get("last_owner_message_ts", 0)
-    if last_msg == 0:
+    gap = state.get("last_silence_gap", 0)
+    if gap < 1800:
         return ""
-    silence = time.time() - last_msg
-    if silence < 1800:
-        return ""
-    return f"\n<<system: {_format_silence(silence)} since their last message>>"
+    return f"\n<<system: It's been {_format_silence(gap)} since they last messaged — they just came back.>>"
 
 
 def tick_anchor_counter() -> bool:
@@ -61,24 +62,9 @@ def tick_anchor_counter() -> bool:
     return False
 
 
-def tick_checker_counter(anchor_fired: bool = False) -> bool:
-    state = _read_state()
-    count = state.get("turns_since_checker_injection", 0) + 1
-    if count >= CHECKER_INJECTION_INTERVAL:
-        state["turns_since_checker_injection"] = 0
-        _write_state(state)
-        return False if anchor_fired else True
-    state["turns_since_checker_injection"] = count
-    _write_state(state)
-    return False
-
-
 # --- Name / avatar one-shot triggers ---
 
 NAME_PROACTIVE_THRESHOLD = 20
-
-def consume_name_proposal_pending():
-    pass
 
 
 def should_proactively_propose_name(message_count: int, name_chosen: bool) -> bool:
@@ -123,7 +109,11 @@ def reset_avatar_prompt_fired():
 
 def record_owner_message():
     state = _read_state()
-    state["last_owner_message_ts"] = time.time()
+    now = time.time()
+    prev = state.get("last_owner_message_ts", 0)
+    state["last_silence_gap"] = now - prev if prev else 0
+    state["last_owner_message_ts"] = now
+    state["consecutive_unanswered_proactive"] = 0
     _write_state(state)
 
 
@@ -145,16 +135,12 @@ def _format_silence(seconds: float) -> str:
 
 
 def _build_proactive_system() -> str:
-    core_raw = memory.load_prompt("system_core.md").strip()
-    core_lines = [l for l in core_raw.splitlines() if l.strip() and not l.startswith("#")]
     files = memory.read_all()
-    parts = ["\n".join(core_lines), memory.strip_meta(files["identity"]), memory.strip_meta(files["relationship"])]
+    parts = [memory.load_system_core(), memory.strip_meta(files["identity"]), memory.strip_meta(files["relationship"]), memory.strip_meta(files["journal"])]
 
-    # Include conversation summaries so the LLM knows what was already discussed
-    summaries = memory.load_summaries()
-    if summaries:
-        history_lines = "\n".join(f"- {s['content']}" for s in summaries)
-        parts.append(f"Conversation history (summarized, oldest to newest):\n{history_lines}")
+    conv_history = memory.format_summary_history().strip()
+    if conv_history:
+        parts.append(conv_history)
 
     return "\n\n---\n\n".join(p for p in parts if p.strip())
 
@@ -175,10 +161,8 @@ async def _check_and_send(bot, agent, owner_id: int, channel_id: int):
         if state.get("avatar_announcement_pending", False):
             state["avatar_announcement_pending"] = False
             _write_state(state)
-            core_raw = memory.load_prompt("system_core.md").strip()
-            core_lines = [l for l in core_raw.splitlines() if l.strip() and not l.startswith("#")]
-            system_core = "\n".join(core_lines)
-            announcement_instruction = memory.load_prompt("avatar_announcement.md").strip()
+            system_core = memory.load_system_core()
+            announcement_instruction = memory.load_prompt("avatar_announcement.md", "ANNOUNCEMENT")
             aclient = anthropic.AsyncAnthropic()
             ann_result = await aclient.messages.create(
                 model=MODEL,
@@ -200,9 +184,13 @@ async def _check_and_send(bot, agent, owner_id: int, channel_id: int):
         if last_msg and now - last_msg < 300:
             return
 
-        # Minimum interval between proactive messages
+        # Dynamic interval: backs off exponentially when ignored
+        unanswered = state.get("consecutive_unanswered_proactive", 0)
+        backoff = min(2 ** unanswered, 8)
+        min_interval = min(PROACTIVE_BASE_INTERVAL * backoff, PROACTIVE_MAX_INTERVAL)
+
         last_attempt = state.get("last_proactive_attempt_ts", 0)
-        if now - last_attempt < PROACTIVE_MIN_INTERVAL:
+        if now - last_attempt < min_interval:
             return
 
         # One prompt — LLM decides whether to speak or stay silent
@@ -219,12 +207,16 @@ async def _check_and_send(bot, agent, owner_id: int, channel_id: int):
         )
         msg = result.content[0].text.strip()
 
+        state = _read_state()
         state["last_proactive_attempt_ts"] = now
-        _write_state(state)
 
         # "." means the LLM chose silence
         if not msg or msg == ".":
+            _write_state(state)
             return
+
+        state["consecutive_unanswered_proactive"] = unanswered + 1
+        _write_state(state)
 
         channel = bot.get_channel(channel_id)
         await channel.send(msg)

@@ -6,6 +6,8 @@ from pathlib import Path
 
 import anthropic
 
+MODEL = "claude-sonnet-4-6"
+
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 PROMPTS_DIR = Path(os.getenv("PROMPTS_DIR", "prompts"))
 DOCS_DIR = Path(os.getenv("DOCS_DIR", "docs"))
@@ -17,9 +19,13 @@ PERSONA_ANCHOR_FILE = DATA_DIR / "persona_anchor.md"
 CONVERSATION_FILE = DATA_DIR / "conversation.jsonl"
 
 
-def load_prompt(name: str) -> str:
-    """Read a prompt template from PROMPTS_DIR."""
-    return (PROMPTS_DIR / name).read_text()
+def load_prompt(name: str, section: str | None = None) -> str:
+    """Read a prompt template from PROMPTS_DIR, optionally extracting a [SECTION] block."""
+    text = (PROMPTS_DIR / name).read_text()
+    if section is None:
+        return text
+    m = re.search(rf"\[{section}\](.*?)\[/{section}\]", text, re.DOTALL)
+    return m.group(1).strip() if m else ""
 
 
 def _copy_template(src: Path, dest: Path):
@@ -46,11 +52,7 @@ def ensure_files_exist():
         CONVERSATION_FILE.write_text("")
 
 
-SUMMARIZE_PROMPT = """\
-Summarize this conversation excerpt in 3-5 sentences as if briefly telling a mutual friend what happened. Include: what they talked about, the person's mood, anything they mentioned that's worth remembering, anything left unresolved. Be concrete, not analytical. No psychological interpretation.
-
-{messages}
-"""
+SUMMARIZE_PROMPT = load_prompt("summarize.md")
 
 
 def load_conversation(raw_maxlen: int = 8) -> list:
@@ -145,13 +147,21 @@ async def summarize_old_messages() -> bool:
     return True
 
 
-def infer_stage(relationship: str) -> str:
-    """Derives stage from what the bot actually knows: is the person's name known?"""
-    m = re.search(r"Name:\s*(.+)", relationship)
-    if not m:
-        return "early"
-    name = m.group(1).strip()
-    return "developing" if name and "(not yet known)" not in name else "early"
+
+def load_system_core() -> str:
+    """Load system_core.md, stripping headers and blank lines."""
+    core_raw = load_prompt("system_core.md").strip()
+    core_lines = [l for l in core_raw.splitlines() if l.strip() and not l.startswith("#")]
+    return "\n".join(core_lines)
+
+
+def format_summary_history() -> str:
+    """Format conversation summaries into a history block, or empty string if none."""
+    summaries = load_summaries()
+    if not summaries:
+        return ""
+    history_lines = "\n".join(f"- {s['content']}" for s in summaries)
+    return f"\nConversation history (summarized, oldest to newest):\n{history_lines}\n"
 
 
 def strip_meta(content: str) -> str:
@@ -172,7 +182,8 @@ def extract_name(identity: str) -> str:
     if not m:
         return "still figuring out your name"
     name = m.group(1).strip()
-    if "(not chosen" in name:
+    # Treat any parenthetical/uncertain name as not yet chosen
+    if name.startswith("(") or "not chosen" in name.lower() or "not yet" in name.lower():
         return "still figuring out your name"
     return name
 
