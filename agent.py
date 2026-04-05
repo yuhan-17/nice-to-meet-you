@@ -10,8 +10,13 @@ import openai
 import memory
 import scheduler
 
-MODEL = "claude-haiku-4-5-20251001"
+MODEL = "claude-sonnet-4-6"
 
+TOOLS = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
+
+CAPABILITIES_PROMPT = """<<system: You have a capability you can invoke in your response:
+
+Generate an image: include <generate_image prompt="a detailed DALL-E description"/> anywhere in your response. Use this when the user asks you to draw, create, or generate an image. Write a descriptive prompt. Don't narrate or describe the generation — just include the tag and respond naturally.>>"""
 
 
 def _build_system_prompt(files: dict, conv_history: str, anchor_due: bool = False, checker_signal: str = "") -> str:
@@ -26,7 +31,6 @@ def _build_system_prompt(files: dict, conv_history: str, anchor_due: bool = Fals
     persona_anchor_if_due = ""
     if anchor_due and memory.PERSONA_ANCHOR_FILE.exists():
         pa_text = memory.PERSONA_ANCHOR_FILE.read_text()
-        # Split on [PART_B] to isolate Part A
         split = re.split(r"\[PART_B\]", pa_text)
         part_a = split[0].strip() if split else ""
         part_a_lines = [l for l in part_a.splitlines() if l.strip() and not l.startswith("#")]
@@ -95,8 +99,19 @@ def _format_conversation(history: deque) -> str:
     lines = []
     for msg in recent:
         role = "Them" if msg["role"] == "user" else "Bot"
-        lines.append(f"{role}: {msg['content']}")
+        # history entries are always plain text
+        content = msg["content"] if isinstance(msg["content"], str) else "[image]"
+        lines.append(f"{role}: {content}")
     return "\n".join(lines)
+
+
+def _collect_text(content_blocks: list) -> str:
+    """Concatenate all text blocks from an API response (web search may add multiple)."""
+    parts = []
+    for block in content_blocks:
+        if hasattr(block, "type") and block.type == "text":
+            parts.append(block.text)
+    return "".join(parts)
 
 
 class Agent:
@@ -116,7 +131,6 @@ class Agent:
         if user_id not in self.short_term_mem:
             d = deque(maxlen=8)
             entries = memory.load_conversation(raw_maxlen=8)
-            # merge consecutive same-role messages, ensure starts with user
             sanitized = []
             for entry in entries:
                 if sanitized and sanitized[-1]["role"] == entry["role"]:
@@ -130,13 +144,31 @@ class Agent:
             self.short_term_mem[user_id] = d
         return self.short_term_mem[user_id]
 
-    async def respond(self, user_id: int, user_message: str) -> str:
+    async def respond(
+        self,
+        user_id: int,
+        user_message: str,
+        image_urls: list[str] | None = None,
+    ) -> tuple[str, bytes | None]:
+        """Returns (text_response, image_bytes_or_None)."""
         try:
             lock = self._get_lock(user_id)
             history = self._get_short_term_mem(user_id)
 
             async with lock:
                 files = memory.read_all()
+
+                # Build user content — multimodal if images attached
+                if image_urls:
+                    user_content = []
+                    if user_message:
+                        user_content.append({"type": "text", "text": user_message})
+                    for url in image_urls:
+                        user_content.append({"type": "image", "source": {"type": "url", "url": url}})
+                else:
+                    user_content = user_message
+
+                # History stores plain text only; multimodal content is passed inline per-call
                 history.append({"role": "user", "content": user_message})
                 memory.append_conversation_entry({"role": "user", "content": user_message})
 
@@ -153,24 +185,19 @@ class Agent:
                 system = _build_system_prompt(files, conv_history, anchor_due, checker_signal)
 
                 # Name injection — reactive and proactive paths
-                # Seeds (if any) are in the relationship context and enrich whichever fires
                 name_chosen = "(not yet chosen)" not in files["identity"]
                 if not name_chosen:
                     msg_lower = user_message.lower()
-                    direct_ask = any(p in msg_lower for p in [
+                    name_relevant = any(p in msg_lower for p in [
                         "what's your name", "what is your name", "your name",
                         "do you have a name", "pick a name", "choose a name",
                         "call yourself", "what should i call you", "who are you",
-                    ])
-                    name_exchange = any(p in msg_lower for p in [
                         "my name is ", "call me ", "name's ",
                     ])
-                    if direct_ask or name_exchange:
-                        system = system + "\n\n" + memory.load_prompt("name_proposal_direct.md").strip()
-                    elif scheduler.should_proactively_propose_name(memory.count_messages(), name_chosen):
-                        system = system + "\n\n" + memory.load_prompt("name_proactive.md").strip()
+                    if name_relevant or scheduler.should_proactively_propose_name(memory.count_messages(), name_chosen):
+                        system = system + "\n\n" + memory.load_prompt("name_proposal.md").strip()
 
-                # Seed-based proposal flag — cleared without firing (seeds enrich direct-ask path)
+                # Seed-based proposal flag — cleared without firing
                 if self._pending_name_proposal:
                     self._pending_name_proposal = False
                     scheduler.consume_name_proposal_pending()
@@ -178,32 +205,63 @@ class Agent:
                 # Avatar signal — inject instruction when not yet generated so LLM can self-trigger
                 avatar_generated = "Avatar: (not yet generated)" not in files["identity"]
                 if not avatar_generated:
-                    system = system + "\n\n<<system: You don't have a profile picture yet. When the user asks you to generate, pick, or update your avatar or profile picture — include the token <generate_avatar/> anywhere in your response. Do not describe or narrate the generation; just include the token and respond naturally. Only include the token when the user is explicitly asking you to do it now.>>"
+                    system = system + "\n\n<<system: You don't have a profile picture yet. If it comes up naturally or the user asks — include <generate_avatar/> in your response to set one. Have an idea of what you'd want it to look like, but don't explain unless asked. Don't narrate the generation. Just include the token and respond naturally.>>"
+
+                # Image generation capability always available
+                system = system + "\n\n" + CAPABILITIES_PROMPT
+
+                # Build messages — replace last user entry with multimodal content if needed
+                api_messages = list(history)[:-1] + [{"role": "user", "content": user_content}]
 
                 aclient = anthropic.AsyncAnthropic()
                 result = await aclient.messages.create(
                     model=MODEL,
                     max_tokens=1024,
                     system=system,
-                    messages=list(history),
+                    tools=TOOLS,
+                    messages=api_messages,
                 )
-                response = result.content[0].text
+                response = _collect_text(result.content)
 
-                # If the LLM signaled avatar generation, trigger it and strip the token
+                # Avatar generation signal
                 if not avatar_generated and re.search(r"<generate_avatar\s*/>", response):
                     response = re.sub(r"<generate_avatar\s*/>", "", response).strip()
                     self._trigger_avatar_generation(user_id)
+
+                # Image generation signal
+                image_bytes = None
+                img_match = re.search(r'<generate_image\s+prompt="([^"]+)"\s*/>', response)
+                if img_match:
+                    dalle_prompt = img_match.group(1)
+                    response = re.sub(r'<generate_image\s+prompt="[^"]+"\s*/>', "", response).strip()
+                    image_bytes = await self._generate_image(dalle_prompt)
 
                 history.append({"role": "assistant", "content": response})
                 memory.append_conversation_entry({"role": "assistant", "content": response})
 
             asyncio.create_task(self._update_memory(user_id, user_message, response))
             asyncio.create_task(self._summarize_if_needed(user_id))
-            return response
+            return response, image_bytes
 
         except Exception:
             import traceback; traceback.print_exc()
-            return "I lost my train of thought. Say that again?"
+            return "I lost my train of thought. Say that again?", None
+
+    async def _generate_image(self, prompt: str) -> bytes | None:
+        try:
+            oaclient = openai.AsyncOpenAI()
+            result = await oaclient.images.generate(
+                model="dall-e-3",
+                prompt=prompt,
+                size="1024x1024",
+                quality="standard",
+                n=1,
+            )
+            url = result.data[0].url
+            return await asyncio.to_thread(lambda: urllib.request.urlopen(url).read())
+        except Exception:
+            import traceback; traceback.print_exc()
+            return None
 
     async def _update_memory(self, user_id: int, user_message: str, bot_response: str):
         try:
@@ -261,12 +319,12 @@ class Agent:
         if self._avatar_generation_in_flight:
             return
         self._avatar_generation_in_flight = True
-        self._trigger_avatar_generation(user_id)
+        asyncio.create_task(self._maybe_generate_avatar(user_id))
 
     async def _maybe_generate_avatar(self, user_id: int):
         try:
             lock = self._get_lock(user_id)
-            async with lock:  # lock protects file reads against concurrent _update_memory writes
+            async with lock:
                 identity_content = memory.IDENTITY_FILE.read_text()
                 journal_content = memory.JOURNAL_FILE.read_text()
                 relationship_content = memory.RELATIONSHIP_FILE.read_text()
@@ -274,7 +332,6 @@ class Agent:
             name = memory.extract_name(identity_content)
             has_name = name != "still figuring out your name"
 
-            # Prose from journal entries (split on ---), falling back to relationship content
             journal_entries = [
                 e.strip() for e in re.split(r"---", journal_content)
                 if e.strip() and "don't have a name yet" not in e and "still forming" not in e
@@ -309,11 +366,9 @@ class Agent:
                 lambda: urllib.request.urlopen(url).read()
             )
 
-            # Discord edit is the confirmation point — only record success after this
             if self.client is not None:
                 await self.client.user.edit(avatar=avatar_bytes)
 
-            # Lock the identity write so it doesn't race with _update_memory
             async with lock:
                 current_identity = memory.IDENTITY_FILE.read_text()
                 updated = current_identity.replace(
@@ -321,8 +376,6 @@ class Agent:
                 )
                 memory.write_identity(updated)
 
-            # Both flags set only after Discord confirms — if anything above threw,
-            # avatar_prompt_fired stays False and the trigger retries next exchange
             scheduler.set_avatar_announcement_pending()
 
         except Exception:
@@ -342,27 +395,19 @@ class Agent:
             else:
                 conv_history = ""
             system = _build_system_prompt(files, conv_history)
-            tier = scheduler.get_silence_tier()
-            tier_prompt_map = {
-                "SHORT": "proactive_short.md",
-                "MEDIUM": "proactive_medium.md",
-                "LONG": "proactive_long.md",
-            }
-            instruction = memory.load_prompt(tier_prompt_map[tier]).strip()
-            trigger = f"<<system: {instruction}>>"
+            instruction = memory.load_prompt("proactive.md").format(silence="a while").strip()
             aclient = anthropic.AsyncAnthropic()
             result = await aclient.messages.create(
                 model=MODEL,
                 max_tokens=256,
                 system=system,
-                messages=[{"role": "user", "content": trigger}],
+                messages=[{"role": "user", "content": f"<<system: {instruction}>>"}],
             )
-            msg = result.content[0].text.strip()
-            if not msg:
+            msg = _collect_text(result.content).strip()
+            if not msg or msg == ".":
                 return None
             self._get_short_term_mem(user_id).append({"role": "assistant", "content": msg})
             memory.append_conversation_entry({"role": "assistant", "content": msg})
-            scheduler.record_proactive_attempt()
             return msg
         except Exception:
             import traceback; traceback.print_exc()

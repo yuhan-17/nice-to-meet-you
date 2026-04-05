@@ -5,17 +5,12 @@ import anthropic
 
 import memory
 
-MODEL = "claude-haiku-4-5-20251001"
+MODEL = "claude-sonnet-4-6"
 
 STATE_FILE = memory.DATA_DIR / "scheduler_state.json"
 
-CHECK_INTERVAL = 5 * 60       # how often _check_and_send fires
-
-TIER_BACKOFFS = {
-    "SHORT":  5 * 60,
-    "MEDIUM": 30 * 60,
-    "LONG":   4 * 3600,
-}
+CHECK_INTERVAL = 10 * 60         # how often the loop fires
+PROACTIVE_MIN_INTERVAL = 30 * 60  # minimum gap between proactive messages
 
 ANCHOR_INJECTION_INTERVAL = 8   # re-inject persona anchor every N conversation turns
 CHECKER_INJECTION_INTERVAL = 10  # inject checker signal every N conversation turns
@@ -37,20 +32,24 @@ def _read_state() -> dict:
     return json.loads(STATE_FILE.read_text())
 
 
+def _write_state(state: dict):
+    STATE_FILE.write_text(json.dumps(state))
+
+
+# --- Anchor / checker injection (quality mechanisms, not proactive outreach) ---
+
 def get_checker_signal() -> str:
-    """Returns a silence note for the system prompt if the user has been quiet for a while."""
     state = _read_state()
     last_msg = state.get("last_owner_message_ts", 0)
     if last_msg == 0:
         return ""
     silence = time.time() - last_msg
-    if silence < 1800:  # less than 30 minutes — not worth noting
+    if silence < 1800:
         return ""
     return f"\n<<system: {_format_silence(silence)} since their last message>>"
 
 
 def tick_anchor_counter() -> bool:
-    """Increment the per-turn counter. Returns True (and resets) when injection is due."""
     state = _read_state()
     count = state.get("turns_since_anchor_injection", 0) + 1
     if count >= ANCHOR_INJECTION_INTERVAL:
@@ -63,8 +62,6 @@ def tick_anchor_counter() -> bool:
 
 
 def tick_checker_counter(anchor_fired: bool = False) -> bool:
-    """Increment the checker counter. Returns True (and resets) when injection is due.
-    If anchor fired this same turn, suppresses checker and still resets the counter."""
     state = _read_state()
     count = state.get("turns_since_checker_injection", 0) + 1
     if count >= CHECKER_INJECTION_INTERVAL:
@@ -76,30 +73,15 @@ def tick_checker_counter(anchor_fired: bool = False) -> bool:
     return False
 
 
-def get_silence_tier() -> str:
-    """Returns SHORT / MEDIUM / LONG based on time since last owner message."""
-    state = _read_state()
-    last_msg = state.get("last_owner_message_ts", 0)
-    if last_msg == 0:
-        return "LONG"
-    silence = time.time() - last_msg
-    if silence < 600:
-        return "SHORT"
-    if silence < 10800:
-        return "MEDIUM"
-    return "LONG"
+# --- Name / avatar one-shot triggers ---
 
+NAME_PROACTIVE_THRESHOLD = 20
 
 def consume_name_proposal_pending():
-    """Clear the in-memory flag without writing state — seeds path is disabled."""
     pass
 
 
-NAME_PROACTIVE_THRESHOLD = 20  # raw messages before proactive name raise fires
-
-
 def should_proactively_propose_name(message_count: int, name_chosen: bool) -> bool:
-    """Returns True once, after NAME_PROACTIVE_THRESHOLD messages, if name still not chosen."""
     if name_chosen:
         return False
     state = _read_state()
@@ -112,9 +94,7 @@ def should_proactively_propose_name(message_count: int, name_chosen: bool) -> bo
     return False
 
 
-
 def should_generate_avatar(name_just_chosen: bool, exchange_count: int, avatar_generated: bool) -> bool:
-    """Returns True once when avatar generation should fire. Never fires again after that."""
     if avatar_generated:
         return False
     state = _read_state()
@@ -134,52 +114,20 @@ def set_avatar_announcement_pending():
 
 
 def reset_avatar_prompt_fired():
-    """Clear the one-time flag so generation can retry after a failure."""
     state = _read_state()
     state["avatar_prompt_fired"] = False
     _write_state(state)
 
 
-def _build_proactive_system() -> str:
-    """Assemble system_core + identity + relationship for proactive LLM calls."""
-    core_raw = memory.load_prompt("system_core.md").strip()
-    core_lines = [l for l in core_raw.splitlines() if l.strip() and not l.startswith("#")]
-    files = memory.read_all()
-    parts = ["\n".join(core_lines), memory.strip_meta(files["identity"]), memory.strip_meta(files["relationship"])]
-    return "\n\n---\n\n".join(p for p in parts if p.strip())
-
-
-async def _passes_proactive_gate(msg: str) -> bool:
-    """Returns True if the message is directed outward, False if it centers the bot's internal state."""
-    gate_prompt = memory.load_prompt("proactive_gate.md").format(message=msg)
-    aclient = anthropic.AsyncAnthropic()
-    result = await aclient.messages.create(
-        model=MODEL,
-        max_tokens=10,
-        messages=[{"role": "user", "content": gate_prompt}],
-    )
-    verdict = result.content[0].text.strip().upper()
-    return verdict.startswith("SEND")
-
-
-def _write_state(state: dict):
-    STATE_FILE.write_text(json.dumps(state))
-
+# --- Timestamps ---
 
 def record_owner_message():
-    """Call from bot.py whenever the owner sends a message."""
     state = _read_state()
     state["last_owner_message_ts"] = time.time()
     _write_state(state)
 
 
-def record_proactive_attempt():
-    """Call after generate_opening() sends successfully."""
-    state = _read_state()
-    state["last_proactive_attempt_ts"] = time.time()
-    _write_state(state)
-
-
+# --- Proactive outreach ---
 
 def _format_silence(seconds: float) -> str:
     if seconds < 60:
@@ -195,6 +143,28 @@ def _format_silence(seconds: float) -> str:
     days = int(seconds / 86400)
     return f"{days} day{'s' if days != 1 else ''}"
 
+
+def _build_proactive_system() -> str:
+    core_raw = memory.load_prompt("system_core.md").strip()
+    core_lines = [l for l in core_raw.splitlines() if l.strip() and not l.startswith("#")]
+    files = memory.read_all()
+    parts = ["\n".join(core_lines), memory.strip_meta(files["identity"]), memory.strip_meta(files["relationship"])]
+
+    # Include conversation summaries so the LLM knows what was already discussed
+    summaries = memory.load_summaries()
+    if summaries:
+        history_lines = "\n".join(f"- {s['content']}" for s in summaries)
+        parts.append(f"Conversation history (summarized, oldest to newest):\n{history_lines}")
+
+    return "\n\n---\n\n".join(p for p in parts if p.strip())
+
+
+def _get_silence_description() -> str:
+    state = _read_state()
+    last_msg = state.get("last_owner_message_ts", 0)
+    if last_msg == 0:
+        return "a while"
+    return _format_silence(time.time() - last_msg)
 
 
 async def _check_and_send(bot, agent, owner_id: int, channel_id: int):
@@ -224,21 +194,22 @@ async def _check_and_send(bot, agent, owner_id: int, channel_id: int):
                 memory.append_conversation_entry({"role": "assistant", "content": ann_msg})
             return
 
-        # No proactive fires into an active conversation
+        # Don't fire into an active conversation
         now = time.time()
         last_msg = state.get("last_owner_message_ts", 0)
-        if last_msg and now - last_msg < 120:
+        if last_msg and now - last_msg < 300:
             return
 
-        # Proactive outreach — single timestamp, per-tier minimum
-        tier = get_silence_tier()
-        backoff = TIER_BACKOFFS[tier]
+        # Minimum interval between proactive messages
         last_attempt = state.get("last_proactive_attempt_ts", 0)
-        if now - last_attempt < backoff:
+        if now - last_attempt < PROACTIVE_MIN_INTERVAL:
             return
 
-        instruction = memory.load_prompt(f"proactive_{tier.lower()}.md").strip()
+        # One prompt — LLM decides whether to speak or stay silent
+        silence = _get_silence_description()
+        instruction = memory.load_prompt("proactive.md").format(silence=silence)
         system = _build_proactive_system()
+
         aclient = anthropic.AsyncAnthropic()
         result = await aclient.messages.create(
             model=MODEL,
@@ -251,7 +222,8 @@ async def _check_and_send(bot, agent, owner_id: int, channel_id: int):
         state["last_proactive_attempt_ts"] = now
         _write_state(state)
 
-        if not msg or not await _passes_proactive_gate(msg):
+        # "." means the LLM chose silence
+        if not msg or msg == ".":
             return
 
         channel = bot.get_channel(channel_id)

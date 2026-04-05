@@ -1,4 +1,5 @@
 import asyncio
+import io
 import os
 
 import discord
@@ -56,12 +57,14 @@ async def on_message(message):
         except Exception:
             pass
 
+    image_urls = [a.url for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
+
     uid = message.author.id
     channel = message.channel
 
     if uid not in _pending:
         _pending[uid] = []
-    _pending[uid].append((message.content, ref_content))
+    _pending[uid].append((message.content, ref_content, image_urls))
     _last_message[uid] = message
     _last_had_ref[uid] = bool(message.reference)
 
@@ -76,30 +79,34 @@ async def on_message(message):
         if not messages:
             return
 
+        all_image_urls = []
         if len(messages) == 1:
-            content, ref = messages[0]
+            content, ref, imgs = messages[0]
             combined = f"[replying to: {ref}]\n{content}" if ref else content
+            all_image_urls = imgs
         else:
             parts = []
-            for content, ref in messages:
+            for content, ref, imgs in messages:
                 if ref:
                     parts.append(f"[replying to: {ref}]\n{content}")
                 else:
                     parts.append(content)
+                all_image_urls.extend(imgs)
             n = len(parts)
             combined = "\n".join(f"[message {i+1} of {n}]: {p}" for i, p in enumerate(parts))
 
         async with channel.typing():
-            response = await agent.respond(uid, combined)
+            response, image_bytes = await agent.respond(uid, combined, image_urls=all_image_urls or None)
 
         response_parts = [p.strip() for p in response.split("||") if p.strip()]
         for i, part in enumerate(response_parts):
             if i > 0:
                 await asyncio.sleep(1.5)
+            file = discord.File(io.BytesIO(image_bytes), filename="image.png") if (i == 0 and image_bytes) else None
             if had_ref and i == 0:
-                await reply_to.reply(part)
+                await reply_to.reply(part, file=file)
             else:
-                await channel.send(part)
+                await channel.send(part, file=file)
 
     _debounce_tasks[uid] = asyncio.create_task(flush())
 
